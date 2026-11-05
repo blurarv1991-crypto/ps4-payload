@@ -1,315 +1,456 @@
 #include <stdio.h>
-#include <string.h>
 #include <stdint.h>
-#include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
+#include <errno.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <orbis/libkernel.h>
+#include <orbis/Sysmodule.h>
+#include <orbis/Usbd.h>
 
-#define NOMBRE "ps4-usb-prueba.pkg"
-#define RUTA_A "/user/data/pkg/" NOMBRE
-#define RUTA_B "/data/pkg/" NOMBRE
-#define DIR_EXT "/mnt/ext0/pkg"
-#define RUTA_EXT DIR_EXT "/" NOMBRE
+#define EP_IN  0x81
+#define EP_OUT 0x01
+#define CAP    16384
+#define CH     262144
+#define MAXH   256
+#define PARTE  67108864u
+#define NOMBRE 256
+#define CARPETA_PKG "/data/pkg"
+#define RUTA_PKG    "/data/pkg/ps4-usb-prueba.pkg"
+#define RUTA_PAYLOAD "/data/ps4-installer.elf"
+#define PUERTO_PAYLOAD 9090
+
+static uint8_t datos[CAP];
+static uint8_t chunk[CH];
+static uint32_t tid = 0;
+static int ruido = 1;
+
+static void wr16(uint8_t *b, uint16_t v) { b[0] = v & 0xff; b[1] = (v >> 8) & 0xff; }
+static void wr32(uint8_t *b, uint32_t v) { for (int i = 0; i < 4; i++) b[i] = (v >> (8 * i)) & 0xff; }
+static uint16_t rd16(const uint8_t *b) { return (uint16_t)(b[0] | (b[1] << 8)); }
+static uint32_t rd32(const uint8_t *b) { return b[0] | (b[1] << 8) | (b[2] << 16) | ((uint32_t)b[3] << 24); }
 
 typedef struct {
-  char pad[45];
-  char message[3075];
+    char pad[45];
+    char message[3075];
 } notify_request_t;
 
-typedef struct {
-  void *mem;
-  unsigned long size;
-} bgft_init_params_t;
+static unsigned long long g_kbs = 0;
 
-typedef struct {
-  int user_id;
-  int entitlement_type;
-  const char *id;
-  const char *content_url;
-  const char *content_ex_url;
-  const char *content_name;
-  const char *icon_path;
-  const char *sku_id;
-  int option;
-  const char *playgo_scenario_id;
-  const char *release_date;
-  const char *package_type;
-  const char *package_sub_type;
-  unsigned long package_size;
-} bgft_download_param_t;
-
-typedef struct {
-  bgft_download_param_t param;
-  unsigned int slot;
-} bgft_download_param_ex_t;
-
-int sceKernelSendNotificationRequest(int dev, notify_request_t *req,
-                                     size_t size, int blocking);
-int sceKernelLoadStartModule(const char *path, size_t argc, const void *argv,
-                             unsigned int flags, const void *opt, int *res);
-int sceKernelDlsym(int handle, const char *symbol, void **addr);
-
-static void anotar(const char *txt, long valor) {
-  FILE *f = fopen("/data/ps4-payload.log", "a");
-  if (f) {
-    fprintf(f, "%s %ld\n", txt, valor);
-    fclose(f);
-  }
+/* Muestra un mensaje en pantalla (notificacion de la PS4) */
+static void avisa(const char *fmt, ...) {
+    notify_request_t req;
+    memset(&req, 0, sizeof(req));
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(req.message, 200, fmt, ap);
+    va_end(ap);
+    sceKernelSendNotificationRequest(0, (OrbisNotificationRequest *)&req, sizeof(req), 0);
 }
 
-static void avisar(const char *texto) {
-  notify_request_t req;
-  memset(&req, 0, sizeof(req));
-  strncpy(req.message, texto, sizeof(req.message) - 1);
-  int r = sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
-  anotar("notificacion devolvio", r);
+/* Manda el payload instalador (/data/ps4-installer.elf) al BinLoader de GoldHEN */
+static int enviar_payload(FILE *f) {
+    FILE *p = fopen(RUTA_PAYLOAD, "rb");
+    if (!p) {
+        fprintf(f, "falta %s\n", RUTA_PAYLOAD);
+        fflush(f);
+        avisa("PS4 USB: falta %s (subelo por FTP)", RUTA_PAYLOAD);
+        return -1;
+    }
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) {
+        fprintf(f, "payload: no pude crear socket (errno=%d)\n", errno);
+        fflush(f);
+        fclose(p);
+        avisa("PS4 USB: no pude abrir la red para el payload");
+        return -1;
+    }
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons(PUERTO_PAYLOAD);
+    a.sin_addr.s_addr = htonl(0x7F000001);
+    if (connect(s, (struct sockaddr *)&a, sizeof(a)) != 0) {
+        fprintf(f, "payload: no conecta al puerto %d (errno=%d)\n", PUERTO_PAYLOAD, errno);
+        fflush(f);
+        close(s);
+        fclose(p);
+        avisa("PS4 USB: no conecta a GoldHEN (activa BinLoader, puerto 9090)");
+        return -1;
+    }
+    static uint8_t buf[65536];
+    long total = 0;
+    int ok = 1;
+    size_t n;
+    while (ok && (n = fread(buf, 1, sizeof(buf), p)) > 0) {
+        size_t off = 0;
+        while (off < n) {
+            ssize_t w = send(s, buf + off, n - off, 0);
+            if (w <= 0) {
+                ok = 0;
+                break;
+            }
+            off += (size_t)w;
+        }
+        total += (long)n;
+    }
+    sceKernelUsleep(500000);
+    close(s);
+    fclose(p);
+    fprintf(f, "payload enviado: %ld bytes ok=%d\n", total, ok);
+    fflush(f);
+    if (!ok) avisa("PS4 USB: fallo al enviar el payload");
+    return ok ? 0 : -1;
 }
 
-static long tamano(const char *ruta) {
-  FILE *f = fopen(ruta, "rb");
-  if (!f) return -1;
-  fseek(f, 0, SEEK_END);
-  long n = ftell(f);
-  fclose(f);
-  return n;
+static unsigned long long kbs(uint64_t bytes, uint64_t us) {
+    if (us == 0) us = 1;
+    return (unsigned long long)(bytes * 1000000ULL / 1024ULL / us);
 }
 
-static int resolver(int h, const char *a, const char *b, void **fn) {
-  int r;
-  *fn = NULL;
-  r = sceKernelDlsym(h, a, fn);
-  if (r == 0 && *fn != NULL) {
-    anotar(a, 1);
+static int enviar(FILE *f, libusb_device_handle *h, uint16_t code, int np, uint32_t p1, uint32_t p2, uint32_t p3, uint32_t p4) {
+    uint8_t b[28];
+    uint32_t len = 12 + 4 * np;
+    tid++;
+    wr32(b, len);
+    wr16(b + 4, 1);
+    wr16(b + 6, code);
+    wr32(b + 8, tid);
+    if (np > 0) wr32(b + 12, p1);
+    if (np > 1) wr32(b + 16, p2);
+    if (np > 2) wr32(b + 20, p3);
+    if (np > 3) wr32(b + 24, p4);
+    int32_t tr = 0;
+    int r = sceUsbdBulkTransfer(h, EP_OUT, b, (int32_t)len, &tr, 5000);
+    if (ruido || r != 0) fprintf(f, "enviar 0x%04x: r=0x%x bytes=%d\n", code, r, tr);
+    fflush(f);
+    return r;
+}
+
+static int leer(libusb_device_handle *h, uint8_t *buf, int32_t max, int32_t *got) {
+    int r = 0;
+    *got = 0;
+    for (int i = 0; i < 3; i++) {
+        r = sceUsbdBulkTransfer(h, EP_IN, buf, max, got, 10000);
+        if (r != 0 || *got > 0) break;
+    }
+    return r;
+}
+
+static int respuesta(FILE *f, libusb_device_handle *h) {
+    uint8_t b[512];
+    int32_t got = 0;
+    int r = leer(h, b, 512, &got);
+    if (r != 0 || got < 12) {
+        fprintf(f, "respuesta: r=0x%x bytes=%d\n", r, got);
+        fflush(f);
+        return -1;
+    }
+    if (ruido || rd16(b + 6) != 0x2001)
+        fprintf(f, "respuesta: tipo=%d codigo=0x%04x\n", rd16(b + 4), rd16(b + 6));
+    fflush(f);
+    return rd16(b + 6);
+}
+
+static int recibir_datos(FILE *f, libusb_device_handle *h, int32_t *total) {
+    int32_t got = 0;
+    int r = leer(h, datos, 512, &got);
+    if (r != 0 || got < 12) {
+        fprintf(f, "datos: r=0x%x bytes=%d\n", r, got);
+        fflush(f);
+        return -1;
+    }
+    if (rd16(datos + 4) == 3) {
+        fprintf(f, "sin datos, respuesta 0x%04x\n", rd16(datos + 6));
+        fflush(f);
+        return -2;
+    }
+    uint32_t largo = rd32(datos);
+    if (largo > CAP - 512) {
+        fprintf(f, "datos demasiado grandes: %u\n", largo);
+        fflush(f);
+        return -1;
+    }
+    while (got < (int32_t)largo) {
+        int32_t g = 0;
+        r = leer(h, datos + got, 512, &g);
+        if (r != 0 || g <= 0) {
+            fprintf(f, "datos cortados: r=0x%x\n", r);
+            fflush(f);
+            return -1;
+        }
+        got += g;
+    }
+    *total = got;
     return 0;
-  }
-  if (b != NULL) {
-    *fn = NULL;
-    r = sceKernelDlsym(h, b, fn);
-    if (r == 0 && *fn != NULL) {
-      anotar(b, 1);
-      return 0;
-    }
-  }
-  anotar("no resolvio", r);
-  anotar(a, 0);
-  return -1;
 }
 
-static int copiar(const char *origen, const char *destino, long total) {
-  FILE *i = fopen(origen, "rb");
-  if (!i) return -1;
-  FILE *o = fopen(destino, "wb");
-  if (!o) {
-    fclose(i);
-    return -2;
-  }
-  static char buf[1048576];
-  long hecho = 0;
-  long aviso = 1073741824L;
-  size_t n;
-  int ok = 1;
-  while ((n = fread(buf, 1, sizeof(buf), i)) > 0) {
-    if (fwrite(buf, 1, n, o) != n) {
-      ok = 0;
-      break;
+static int info(FILE *f, libusb_device_handle *h, uint32_t handle, uint16_t *fmt, uint32_t *tam, char *nombre) {
+    int32_t total = 0;
+    nombre[0] = 0;
+    if (enviar(f, h, 0x1008, 1, handle, 0, 0, 0) != 0) return -1;
+    if (recibir_datos(f, h, &total) != 0) return -1;
+    const uint8_t *p = datos + 12;
+    if (total < 12 + 53) return -1;
+    *fmt = rd16(p + 4);
+    *tam = rd32(p + 8);
+    int ln = p[52];
+    int k = 0;
+    if (12 + 53 + 2 * ln <= total) {
+        for (int i = 0; i < ln && k < NOMBRE - 1; i++) {
+            uint8_t lo = p[53 + 2 * i];
+            uint8_t hi = p[53 + 2 * i + 1];
+            if (lo == 0 && hi == 0) break;
+            nombre[k++] = (hi == 0 && lo >= 32 && lo < 127) ? (char)lo : '?';
+        }
     }
-    hecho += (long)n;
-    if (hecho >= aviso) {
-      char m[120];
-      snprintf(m, sizeof(m), "v7: copiando al disco externo... %ld de %ld MB",
-               hecho / 1048576, total / 1048576);
-      avisar(m);
-      aviso += 1073741824L;
+    nombre[k] = 0;
+    respuesta(f, h);
+    return 0;
+}
+
+static int listar(FILE *f, libusb_device_handle *h, uint32_t parent, uint32_t *hs, uint32_t *nh, uint32_t *cuenta) {
+    int32_t total = 0;
+    *nh = 0;
+    *cuenta = 0;
+    if (enviar(f, h, 0x1007, 3, 0x00010001, 0, parent, 0) != 0) return -1;
+    if (recibir_datos(f, h, &total) != 0) return -1;
+    *cuenta = rd32(datos + 12);
+    for (uint32_t i = 0; i < *cuenta && i < MAXH && (int32_t)(16 + 4 * i + 4) <= total; i++) {
+        hs[(*nh)++] = rd32(datos + 16 + 4 * i);
     }
-  }
-  fclose(i);
-  if (fclose(o) != 0) ok = 0;
-  anotar("copiado bytes", hecho);
-  if (!ok || hecho != total) {
-    unlink(destino);
-    return -3;
-  }
-  return 0;
+    respuesta(f, h);
+    return 0;
+}
+
+static int es_pkg(const char *n) {
+    int len = (int)strlen(n);
+    if (len <= 4) return 0;
+    const char *e = n + len - 4;
+    return e[0] == '.' && (e[1] == 'p' || e[1] == 'P') && (e[2] == 'k' || e[2] == 'K') && (e[3] == 'g' || e[3] == 'G');
+}
+
+/* Tamano real (64 bits) de un objeto: hace falta para archivos de mas de 4 GB */
+static int tam64(FILE *f, libusb_device_handle *h, uint32_t handle, uint64_t *out) {
+    int32_t total = 0;
+    if (enviar(f, h, 0x9803, 2, handle, 0xDC04, 0, 0) != 0) return -1;
+    if (recibir_datos(f, h, &total) != 0) return -1;
+    int ok = total >= 12 + 8;
+    if (ok) *out = (uint64_t)rd32(datos + 12) | ((uint64_t)rd32(datos + 16) << 32);
+    respuesta(f, h);
+    return ok ? 0 : -1;
+}
+
+/* Baja un archivo por partes de 64 MB (GetPartialObject64) y lo guarda en la PS4 */
+static int guardar(FILE *f, libusb_device_handle *h, uint32_t handle, uint64_t tam, const char *ruta) {
+    FILE *o = fopen(ruta, "wb");
+    if (!o) {
+        fprintf(f, "no pude crear %s\n", ruta);
+        return -1;
+    }
+    uint64_t t0 = sceKernelGetProcessTime();
+    uint64_t tw = 0;
+    uint64_t hecho = 0;
+    uint64_t aviso = 1073741824ULL;
+    int ok = 1;
+
+    while (hecho < tam) {
+        uint64_t resto = tam - hecho;
+        uint32_t pedir = resto > PARTE ? PARTE : (uint32_t)resto;
+        if (enviar(f, h, 0x95C1, 4, handle, (uint32_t)(hecho & 0xFFFFFFFFULL), (uint32_t)(hecho >> 32), pedir) != 0) {
+            ok = 0;
+            break;
+        }
+        int32_t got = 0;
+        int r = leer(h, chunk, CH, &got);
+        if (r != 0 || got < 12 || rd16(chunk + 4) != 2) {
+            fprintf(f, "guardar: r=0x%x bytes=%d codigo=0x%04x despues de %llu bytes\n", r, got,
+                    got >= 8 ? rd16(chunk + 6) : 0, (unsigned long long)hecho);
+            ok = 0;
+            break;
+        }
+        uint32_t falta = rd32(chunk) - 12;
+        uint32_t parte = (uint32_t)(got - 12);
+        uint64_t a = sceKernelGetProcessTime();
+        size_t w = fwrite(chunk + 12, 1, (size_t)(got - 12), o);
+        tw += sceKernelGetProcessTime() - a;
+        if (w != (size_t)(got - 12)) {
+            fprintf(f, "error escribiendo despues de %llu bytes\n", (unsigned long long)hecho);
+            ok = 0;
+            break;
+        }
+        while (parte < falta) {
+            got = 0;
+            r = leer(h, chunk, CH, &got);
+            if (r != 0 || got <= 0) {
+                fprintf(f, "guardar cortado: r=0x%x despues de %llu bytes\n", r, (unsigned long long)(hecho + parte));
+                ok = 0;
+                break;
+            }
+            a = sceKernelGetProcessTime();
+            w = fwrite(chunk, 1, (size_t)got, o);
+            tw += sceKernelGetProcessTime() - a;
+            if (w != (size_t)got) {
+                fprintf(f, "error escribiendo despues de %llu bytes\n", (unsigned long long)(hecho + parte));
+                ok = 0;
+                break;
+            }
+            parte += (uint32_t)got;
+        }
+        hecho += parte;
+        if (!ok) break;
+        respuesta(f, h);
+        if (parte == 0) {
+            ok = 0;
+            break;
+        }
+        if (hecho >= aviso) {
+            avisa("PS4 USB: guardando... %llu de %llu MB", (unsigned long long)(hecho / 1048576ULL),
+                  (unsigned long long)(tam / 1048576ULL));
+            aviso += 1073741824ULL;
+        }
+    }
+
+    uint64_t a2 = sceKernelGetProcessTime();
+    fclose(o);
+    tw += sceKernelGetProcessTime() - a2;
+
+    uint64_t total = sceKernelGetProcessTime() - t0;
+    uint64_t tusb = total > tw ? total - tw : 1;
+    fprintf(f, "guardado %llu de %llu bytes en %s\n", (unsigned long long)hecho, (unsigned long long)tam, ruta);
+    fprintf(f, "total: %llu ms = %llu KB/s\n", (unsigned long long)(total / 1000), kbs(hecho, total));
+    fprintf(f, "tiempo USB: %llu ms = %llu KB/s\n", (unsigned long long)(tusb / 1000), kbs(hecho, tusb));
+    fprintf(f, "tiempo escribiendo: %llu ms = %llu KB/s\n", (unsigned long long)(tw / 1000), kbs(hecho, tw));
+    fflush(f);
+    g_kbs = kbs(hecho, total);
+    return (ok && hecho == tam) ? 0 : -1;
 }
 
 int main(void) {
-  char msg[400];
-  int res = 0;
+    FILE *f = fopen("/data/ps4-usb.txt", "w");
+    if (!f) return 1;
+    int guardado_ok = 0;
+    avisa("PS4 USB: buscando el celular...");
 
-  anotar("instalador v7 (BGFT) arranco", 0);
+    sceSysmoduleLoadModule(ORBIS_SYSMODULE_USBD);
+    int r = sceUsbdInit();
+    fprintf(f, "init: 0x%x\n", r);
 
-  long ta = tamano(RUTA_A);
-  long tb = tamano(RUTA_B);
-  long te = tamano(RUTA_EXT);
-  anotar("tamano /user/data/pkg", ta);
-  anotar("tamano /data/pkg", tb);
-  anotar("tamano disco externo", te);
+    libusb_device **lista = NULL;
+    int n = sceUsbdGetDeviceList(&lista);
+    fprintf(f, "dispositivos=%d\n", n);
 
-  const char *origen = NULL;
-  long tam = 0;
-  if (ta >= 0) {
-    origen = RUTA_A;
-    tam = ta;
-  } else if (tb >= 0) {
-    origen = RUTA_B;
-    tam = tb;
-  }
-
-  const char *ruta = NULL;
-  const char *a_borrar = NULL;
-  if (origen) {
-    mkdir(DIR_EXT, 0777);
-    avisar("v7: copiando el .pkg al disco externo...");
-    int rc = copiar(origen, RUTA_EXT, tam);
-    anotar("copiar al externo devolvio", rc);
-    if (rc == 0) {
-      ruta = RUTA_EXT;
-      a_borrar = origen;
-      avisar("v7: copiado al disco externo, instalando");
-    } else {
-      snprintf(msg, sizeof(msg),
-               "v7: no pude copiar al externo (%d), instalo desde el interno", rc);
-      avisar(msg);
-      ruta = origen;
+    libusb_device *cel = NULL;
+    for (int j = 0; j < n; j++) {
+        struct libusb_device_descriptor d;
+        if (sceUsbdGetDeviceDescriptor(lista[j], &d) != 0) continue;
+        if (d.idVendor == 0x2717) { cel = lista[j]; break; }
     }
-  } else if (te >= 0) {
-    ruta = RUTA_EXT;
-    tam = te;
-  } else {
-    avisar("v7: no existe ps4-usb-prueba.pkg en /data/pkg ni en el disco externo");
-    return 0;
-  }
 
-  int h = sceKernelLoadStartModule("/system/common/lib/libSceAppInstUtil.sprx",
-                                   0, NULL, 0, NULL, &res);
-  anotar("cargar AppInstUtil", h);
-  if (h < 0) {
-    snprintf(msg, sizeof(msg), "v7: no cargo AppInstUtil (0x%x)",
-             (unsigned int)h);
-    avisar(msg);
-    return 0;
-  }
+    if (cel) {
+        libusb_device_handle *h = NULL;
+        r = sceUsbdOpen(cel, &h);
+        fprintf(f, "abrir celular: 0x%x\n", r);
+        if (r == 0 && h) {
+            r = sceUsbdClaimInterface(h, 0);
+            fprintf(f, "reclamar interfaz 0: 0x%x\n", r);
+            if (r == 0) {
+                uint32_t hs[MAXH];
+                uint32_t nh = 0, cuenta = 0, dl = 0;
+                uint16_t fmt = 0;
+                uint32_t tam = 0;
+                char nombre[NOMBRE];
 
-  void *f_init = NULL, *f_tid = NULL, *f_slot = NULL, *f_over = NULL;
-  if (resolver(h, "sceAppInstUtilInitialize", NULL, &f_init) ||
-      resolver(h, "sceAppInstUtilGetTitleIdFromPkg", NULL, &f_tid) ||
-      resolver(h, "sceAppInstUtilGetPrimaryAppSlot", NULL, &f_slot) ||
-      resolver(h, "sceAppInstUtilAppPrepareOverwritePkg", NULL, &f_over)) {
-    avisar("v7: faltan funciones de AppInstUtil (mira el log)");
-    return 0;
-  }
+                enviar(f, h, 0x1002, 1, 1, 0, 0, 0);
+                respuesta(f, h);
+                ruido = 0;
 
-  int ini = ((int (*)(void))f_init)();
-  anotar("initialize devolvio", ini);
-  if (ini != 0) {
-    snprintf(msg, sizeof(msg), "v7: initialize fallo (0x%x)",
-             (unsigned int)ini);
-    avisar(msg);
-    return 0;
-  }
+                if (listar(f, h, 0xFFFFFFFF, hs, &nh, &cuenta) == 0) {
+                    for (uint32_t i = 0; i < nh; i++) {
+                        if (info(f, h, hs[i], &fmt, &tam, nombre) != 0) continue;
+                        if (fmt == 0x3001 && strcmp(nombre, "Download") == 0) {
+                            dl = hs[i];
+                            break;
+                        }
+                    }
+                }
 
-  char title_id[32];
-  memset(title_id, 0, sizeof(title_id));
-  int is_app = 0;
-  int rt = ((int (*)(const char *, char *, int *))f_tid)(ruta, title_id,
-                                                         &is_app);
-  anotar("GetTitleIdFromPkg devolvio", rt);
-  if (rt != 0) {
-    snprintf(msg, sizeof(msg), "v7: no pudo leer el pkg (0x%x)",
-             (unsigned int)rt);
-    avisar(msg);
-    return 0;
-  }
+                if (!dl) {
+                    fprintf(f, "no encontre la carpeta Download\n");
+                    avisa("PS4 USB: no encontre la carpeta Download en el celular");
+                } else {
+                    uint32_t cand = 0;
+                    uint64_t ctam = 0;
+                    char cnombre[NOMBRE];
+                    cnombre[0] = 0;
+                    if (listar(f, h, dl, hs, &nh, &cuenta) == 0) {
+                        fprintf(f, "Download: %u objetos (reviso %u)\n", cuenta, nh);
+                        for (uint32_t i = 0; i < nh; i++) {
+                            if (info(f, h, hs[i], &fmt, &tam, nombre) != 0) continue;
+                            if (fmt == 0x3001 || !es_pkg(nombre)) continue;
+                            uint64_t t = tam;
+                            if (tam == 0xFFFFFFFFu) {
+                                t = 0;
+                                uint64_t t64 = 0;
+                                if (tam64(f, h, hs[i], &t64) == 0) t = t64;
+                                else fprintf(f, "no pude leer el tamano de %s\n", nombre);
+                            }
+                            fprintf(f, "pkg: %s (%llu bytes)\n", nombre, (unsigned long long)t);
+                            if (t > 1048576ULL && t > ctam) {
+                                cand = hs[i];
+                                ctam = t;
+                                strncpy(cnombre, nombre, NOMBRE - 1);
+                                cnombre[NOMBRE - 1] = 0;
+                            }
+                        }
+                        if (cand) fprintf(f, "elegido: %s (%llu bytes)\n", cnombre, (unsigned long long)ctam);
+                    }
 
-  unsigned int slot = 0;
-  int overwrite = 0;
-  int rs = ((int (*)(const char *, unsigned int *))f_slot)(title_id, &slot);
-  anotar("GetPrimaryAppSlot devolvio", rs);
-  if (rs != 0) {
-    if ((unsigned int)rs == 0x80A3000Eu) {
-      slot = 0;
+                    if (cand) {
+                        ruido = 1;
+                        mkdir(CARPETA_PKG, 0777);
+                        avisa("PS4 USB: guardando %s (%llu MB)...", cnombre, (unsigned long long)(ctam / 1048576ULL));
+                        if (guardar(f, h, cand, ctam, RUTA_PKG) == 0) {
+                            guardado_ok = 1;
+                            avisa("PS4 USB: guardado (%llu MB/s)", g_kbs / 1024);
+                        } else {
+                            avisa("PS4 USB: fallo al guardar el .pkg (mira /data/ps4-usb.txt)");
+                        }
+                    } else {
+                        fprintf(f, "no encontre un .pkg grande en Download\n");
+                        avisa("PS4 USB: no hay un .pkg grande en la carpeta Download del celular");
+                    }
+                }
+
+                ruido = 1;
+                enviar(f, h, 0x1003, 0, 0, 0, 0, 0);
+                respuesta(f, h);
+                sceUsbdReleaseInterface(h, 0);
+            }
+            sceUsbdClose(h);
+        }
     } else {
-      snprintf(msg, sizeof(msg), "v7: slot fallo (0x%x)", (unsigned int)rs);
-      avisar(msg);
-      return 0;
+        fprintf(f, "no encontre el celular\n");
+        avisa("PS4 USB: no encontre el celular (cable y modo Transferencia de archivos)");
     }
-  } else if (is_app) {
-    overwrite = 1;
-  }
-  if (overwrite) {
-    int ro = ((int (*)(const char *))f_over)(ruta);
-    anotar("PrepareOverwritePkg devolvio", ro);
-  }
 
-  int hb = sceKernelLoadStartModule("/system/common/lib/libSceBgft.sprx", 0,
-                                    NULL, 0, NULL, &res);
-  anotar("cargar Bgft", hb);
-  if (hb < 0) {
-    snprintf(msg, sizeof(msg), "v7: no cargo Bgft (0x%x)", (unsigned int)hb);
-    avisar(msg);
+    if (n >= 0) sceUsbdFreeDeviceList(lista);
+    sceUsbdExit();
+
+    if (guardado_ok) {
+        avisa("PS4 USB: enviando el instalador...");
+        enviar_payload(f);
+        sceKernelSleep(20);
+    } else {
+        sceKernelSleep(5);
+    }
+
+    fprintf(f, "fin\n");
+    fclose(f);
     return 0;
-  }
-
-  void *f_binit = NULL, *f_breg = NULL, *f_bstart = NULL;
-  if (resolver(hb, "sceBgftInitialize", "sceBgftServiceIntInit", &f_binit) ||
-      resolver(hb, "sceBgftDownloadRegisterTaskByStorageEx",
-               "sceBgftServiceIntDownloadRegisterTaskByStorageEx", &f_breg) ||
-      resolver(hb, "sceBgftDownloadStartTask",
-               "sceBgftServiceIntDownloadStartTask", &f_bstart)) {
-    avisar("v7: faltan funciones de Bgft (mira el log)");
-    return 0;
-  }
-
-  bgft_init_params_t ip;
-  memset(&ip, 0, sizeof(ip));
-  ip.size = 0x100000;
-  ip.mem = malloc(ip.size);
-  if (!ip.mem) {
-    avisar("v7: sin memoria para Bgft");
-    return 0;
-  }
-  memset(ip.mem, 0, ip.size);
-
-  int rbi = ((int (*)(bgft_init_params_t *))f_binit)(&ip);
-  anotar("Bgft init devolvio", rbi);
-  if (rbi != 0) {
-    /* Si el instalador ya corrio antes en este arranque, Bgft puede seguir
-       iniciado y devolver error aqui. No paramos: probamos a registrar igual. */
-    anotar("Bgft init fallo, sigo igual", rbi);
-  }
-
-  const char *nombre = NOMBRE;
-  bgft_download_param_ex_t dp;
-  memset(&dp, 0, sizeof(dp));
-  dp.param.entitlement_type = 5;
-  dp.param.id = "";
-  dp.param.content_url = ruta;
-  dp.param.content_name = nombre;
-  dp.param.icon_path = "";
-  dp.param.playgo_scenario_id = "0";
-  dp.param.option = 0x10000;
-  dp.slot = slot;
-
-  int task = -1;
-  int rr = ((int (*)(bgft_download_param_ex_t *, int *))f_breg)(&dp, &task);
-  anotar("Bgft registrar devolvio", rr);
-  anotar("task id", task);
-  if (rr != 0) {
-    snprintf(msg, sizeof(msg), "v7: registrar fallo (0x%x) init=0x%x id=%s",
-             (unsigned int)rr, (unsigned int)rbi, title_id);
-    avisar(msg);
-    return 0;
-  }
-
-  int rst = ((int (*)(int))f_bstart)(task);
-  anotar("Bgft start devolvio", rst);
-  if (a_borrar && rr == 0 && rst == 0) {
-    int ru = unlink(a_borrar);
-    anotar("borre el original del disco interno", ru);
-  }
-
-  snprintf(msg, sizeof(msg), "v7: id=%s tam=%ld slot=%u reg=0x%x start=0x%x",
-           title_id, tam, slot, (unsigned int)rr, (unsigned int)rst);
-  avisar(msg);
-  return 0;
 }
