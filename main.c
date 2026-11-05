@@ -1,8 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
-#include <dirent.h>
-#include <errno.h>
+#include <stdlib.h>
 
 #define NOMBRE "ps4-usb-prueba.pkg"
 #define RUTA_A "/user/data/pkg/" NOMBRE
@@ -12,6 +11,33 @@ typedef struct {
   char pad[45];
   char message[3075];
 } notify_request_t;
+
+typedef struct {
+  void *mem;
+  unsigned long size;
+} bgft_init_params_t;
+
+typedef struct {
+  int user_id;
+  int entitlement_type;
+  const char *id;
+  const char *content_url;
+  const char *content_ex_url;
+  const char *content_name;
+  const char *icon_path;
+  const char *sku_id;
+  int option;
+  const char *playgo_scenario_id;
+  const char *release_date;
+  const char *package_type;
+  const char *package_sub_type;
+  unsigned long package_size;
+} bgft_download_param_t;
+
+typedef struct {
+  bgft_download_param_t param;
+  unsigned int slot;
+} bgft_download_param_ex_t;
 
 int sceKernelSendNotificationRequest(int dev, notify_request_t *req,
                                      size_t size, int blocking);
@@ -44,92 +70,170 @@ static long tamano(const char *ruta) {
   return n;
 }
 
-static void listar(const char *dir) {
-  char msg[300];
-  DIR *d = opendir(dir);
-  if (!d) {
-    snprintf(msg, sizeof(msg), "Lista %s: no se pudo abrir (errno %d)", dir,
-             errno);
-    avisar(msg);
-    return;
+static int resolver(int h, const char *a, const char *b, void **fn) {
+  int r;
+  *fn = NULL;
+  r = sceKernelDlsym(h, a, fn);
+  if (r == 0 && *fn != NULL) {
+    anotar(a, 1);
+    return 0;
   }
-  int n = 0;
-  struct dirent *e;
-  while ((e = readdir(d)) != NULL) {
-    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
-    char ruta[600];
-    snprintf(ruta, sizeof(ruta), "%s/%s", dir, e->d_name);
-    long t = tamano(ruta);
-    anotar(ruta, t);
-    n++;
-    if (n <= 5) {
-      snprintf(msg, sizeof(msg), "Lista %s: %s (%ld bytes)", dir, e->d_name, t);
-      avisar(msg);
+  if (b != NULL) {
+    *fn = NULL;
+    r = sceKernelDlsym(h, b, fn);
+    if (r == 0 && *fn != NULL) {
+      anotar(b, 1);
+      return 0;
     }
   }
-  closedir(d);
-  snprintf(msg, sizeof(msg), "Lista %s: %d archivos en total", dir, n);
-  avisar(msg);
+  anotar("no resolvio", r);
+  anotar(a, 0);
+  return -1;
 }
 
 int main(void) {
-  char msg[300];
+  char msg[400];
   int res = 0;
 
-  anotar("instalador v4 arranco", 0);
+  anotar("instalador v5 (BGFT) arranco", 0);
 
-  listar("/data/pkg");
-  listar("/user/data/pkg");
-
-  long tb = tamano(RUTA_B);
   long ta = tamano(RUTA_A);
-  anotar("tamano /data/pkg", tb);
+  long tb = tamano(RUTA_B);
   anotar("tamano /user/data/pkg", ta);
-  if (tb < 0 && ta < 0) {
-    avisar("Instalador v4: no existe ps4-usb-prueba.pkg, no se instala");
+  anotar("tamano /data/pkg", tb);
+  if (ta < 0 && tb < 0) {
+    avisar("v5: no existe ps4-usb-prueba.pkg en /data/pkg");
     return 0;
   }
+  const char *ruta = (ta >= 0) ? RUTA_A : RUTA_B;
+  long tam = (ta >= 0) ? ta : tb;
 
   int h = sceKernelLoadStartModule("/system/common/lib/libSceAppInstUtil.sprx",
                                    0, NULL, 0, NULL, &res);
-  anotar("cargar modulo devolvio", h);
+  anotar("cargar AppInstUtil", h);
   if (h < 0) {
-    snprintf(msg, sizeof(msg), "Instalador v4: no cargo AppInstUtil (0x%x)",
+    snprintf(msg, sizeof(msg), "v5: no cargo AppInstUtil (0x%x)",
              (unsigned int)h);
     avisar(msg);
     return 0;
   }
 
-  void *f_init = NULL;
-  void *f_inst = NULL;
-  int r1 = sceKernelDlsym(h, "sceAppInstUtilInitialize", &f_init);
-  int r2 = sceKernelDlsym(h, "sceAppInstUtilAppInstallPkg", &f_inst);
-  if (r1 != 0 || f_init == NULL || r2 != 0 || f_inst == NULL) {
-    snprintf(msg, sizeof(msg), "Instalador v4: faltan funciones (%d, %d)", r1,
-             r2);
-    avisar(msg);
+  void *f_init = NULL, *f_tid = NULL, *f_slot = NULL, *f_over = NULL;
+  if (resolver(h, "sceAppInstUtilInitialize", NULL, &f_init) ||
+      resolver(h, "sceAppInstUtilGetTitleIdFromPkg", NULL, &f_tid) ||
+      resolver(h, "sceAppInstUtilGetPrimaryAppSlot", NULL, &f_slot) ||
+      resolver(h, "sceAppInstUtilAppPrepareOverwritePkg", NULL, &f_over)) {
+    avisar("v5: faltan funciones de AppInstUtil (mira el log)");
     return 0;
   }
 
   int ini = ((int (*)(void))f_init)();
   anotar("initialize devolvio", ini);
   if (ini != 0) {
-    snprintf(msg, sizeof(msg), "Instalador v4: initialize fallo (0x%x)",
+    snprintf(msg, sizeof(msg), "v5: initialize fallo (0x%x)",
              (unsigned int)ini);
     avisar(msg);
     return 0;
   }
 
-  int ra = ((int (*)(const char *, int))f_inst)(RUTA_A, 0);
-  anotar("AppInstallPkg /user/data devolvio", ra);
-  int rb = 0;
-  if ((unsigned int)ra == 0x80020002u) {
-    rb = ((int (*)(const char *, int))f_inst)(RUTA_B, 0);
-    anotar("AppInstallPkg /data devolvio", rb);
+  char title_id[32];
+  memset(title_id, 0, sizeof(title_id));
+  int is_app = 0;
+  int rt = ((int (*)(const char *, char *, int *))f_tid)(ruta, title_id,
+                                                         &is_app);
+  anotar("GetTitleIdFromPkg devolvio", rt);
+  if (rt != 0) {
+    snprintf(msg, sizeof(msg), "v5: no pudo leer el pkg (0x%x)",
+             (unsigned int)rt);
+    avisar(msg);
+    return 0;
   }
 
-  snprintf(msg, sizeof(msg), "Instalador v4: tam=%ld user=0x%x data=0x%x",
-           tb >= 0 ? tb : ta, (unsigned int)ra, (unsigned int)rb);
+  unsigned int slot = 0;
+  int overwrite = 0;
+  int rs = ((int (*)(const char *, unsigned int *))f_slot)(title_id, &slot);
+  anotar("GetPrimaryAppSlot devolvio", rs);
+  if (rs != 0) {
+    if ((unsigned int)rs == 0x80A3000Eu) {
+      slot = 0;
+    } else {
+      snprintf(msg, sizeof(msg), "v5: slot fallo (0x%x)", (unsigned int)rs);
+      avisar(msg);
+      return 0;
+    }
+  } else if (is_app) {
+    overwrite = 1;
+  }
+  if (overwrite) {
+    int ro = ((int (*)(const char *))f_over)(ruta);
+    anotar("PrepareOverwritePkg devolvio", ro);
+  }
+
+  int hb = sceKernelLoadStartModule("/system/common/lib/libSceBgft.sprx", 0,
+                                    NULL, 0, NULL, &res);
+  anotar("cargar Bgft", hb);
+  if (hb < 0) {
+    snprintf(msg, sizeof(msg), "v5: no cargo Bgft (0x%x)", (unsigned int)hb);
+    avisar(msg);
+    return 0;
+  }
+
+  void *f_binit = NULL, *f_breg = NULL, *f_bstart = NULL;
+  if (resolver(hb, "sceBgftInitialize", "sceBgftServiceIntInit", &f_binit) ||
+      resolver(hb, "sceBgftDownloadRegisterTaskByStorageEx",
+               "sceBgftServiceIntDownloadRegisterTaskByStorageEx", &f_breg) ||
+      resolver(hb, "sceBgftDownloadStartTask",
+               "sceBgftServiceIntDownloadStartTask", &f_bstart)) {
+    avisar("v5: faltan funciones de Bgft (mira el log)");
+    return 0;
+  }
+
+  bgft_init_params_t ip;
+  memset(&ip, 0, sizeof(ip));
+  ip.size = 0x100000;
+  ip.mem = malloc(ip.size);
+  if (!ip.mem) {
+    avisar("v5: sin memoria para Bgft");
+    return 0;
+  }
+  memset(ip.mem, 0, ip.size);
+
+  int rbi = ((int (*)(bgft_init_params_t *))f_binit)(&ip);
+  anotar("Bgft init devolvio", rbi);
+  if (rbi != 0) {
+    snprintf(msg, sizeof(msg), "v5: Bgft init fallo (0x%x)", (unsigned int)rbi);
+    avisar(msg);
+    return 0;
+  }
+
+  const char *nombre = NOMBRE;
+  bgft_download_param_ex_t dp;
+  memset(&dp, 0, sizeof(dp));
+  dp.param.entitlement_type = 5;
+  dp.param.id = "";
+  dp.param.content_url = ruta;
+  dp.param.content_name = nombre;
+  dp.param.icon_path = "";
+  dp.param.playgo_scenario_id = "0";
+  dp.param.option = 0x10000;
+  dp.slot = slot;
+
+  int task = -1;
+  int rr = ((int (*)(bgft_download_param_ex_t *, int *))f_breg)(&dp, &task);
+  anotar("Bgft registrar devolvio", rr);
+  anotar("task id", task);
+  if (rr != 0) {
+    snprintf(msg, sizeof(msg), "v5: registrar fallo (0x%x) id=%s",
+             (unsigned int)rr, title_id);
+    avisar(msg);
+    return 0;
+  }
+
+  int rst = ((int (*)(int))f_bstart)(task);
+  anotar("Bgft start devolvio", rst);
+
+  snprintf(msg, sizeof(msg), "v5: id=%s tam=%ld slot=%u reg=0x%x start=0x%x",
+           title_id, tam, slot, (unsigned int)rr, (unsigned int)rst);
   avisar(msg);
   return 0;
 }
