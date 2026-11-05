@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <dirent.h>
+#include <errno.h>
 
 #define NOMBRE "ps4-usb-prueba.pkg"
 #define RUTA_A "/user/data/pkg/" NOMBRE
@@ -42,22 +44,57 @@ static long tamano(const char *ruta) {
   return n;
 }
 
+static void listar(const char *dir) {
+  char msg[300];
+  DIR *d = opendir(dir);
+  if (!d) {
+    snprintf(msg, sizeof(msg), "Lista %s: no se pudo abrir (errno %d)", dir,
+             errno);
+    avisar(msg);
+    return;
+  }
+  int n = 0;
+  struct dirent *e;
+  while ((e = readdir(d)) != NULL) {
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+    char ruta[600];
+    snprintf(ruta, sizeof(ruta), "%s/%s", dir, e->d_name);
+    long t = tamano(ruta);
+    anotar(ruta, t);
+    n++;
+    if (n <= 5) {
+      snprintf(msg, sizeof(msg), "Lista %s: %s (%ld bytes)", dir, e->d_name, t);
+      avisar(msg);
+    }
+  }
+  closedir(d);
+  snprintf(msg, sizeof(msg), "Lista %s: %d archivos en total", dir, n);
+  avisar(msg);
+}
+
 int main(void) {
   char msg[300];
   int res = 0;
 
-  anotar("instalador v3 arranco", 0);
+  anotar("instalador v4 arranco", 0);
+
+  listar("/data/pkg");
+  listar("/user/data/pkg");
 
   long tb = tamano(RUTA_B);
   long ta = tamano(RUTA_A);
   anotar("tamano /data/pkg", tb);
   anotar("tamano /user/data/pkg", ta);
+  if (tb < 0 && ta < 0) {
+    avisar("Instalador v4: no existe ps4-usb-prueba.pkg, no se instala");
+    return 0;
+  }
 
   int h = sceKernelLoadStartModule("/system/common/lib/libSceAppInstUtil.sprx",
                                    0, NULL, 0, NULL, &res);
   anotar("cargar modulo devolvio", h);
   if (h < 0) {
-    snprintf(msg, sizeof(msg), "Instalador v3: no cargo AppInstUtil (0x%x)",
+    snprintf(msg, sizeof(msg), "Instalador v4: no cargo AppInstUtil (0x%x)",
              (unsigned int)h);
     avisar(msg);
     return 0;
@@ -68,7 +105,7 @@ int main(void) {
   int r1 = sceKernelDlsym(h, "sceAppInstUtilInitialize", &f_init);
   int r2 = sceKernelDlsym(h, "sceAppInstUtilAppInstallPkg", &f_inst);
   if (r1 != 0 || f_init == NULL || r2 != 0 || f_inst == NULL) {
-    snprintf(msg, sizeof(msg), "Instalador v3: faltan funciones (%d, %d)", r1,
+    snprintf(msg, sizeof(msg), "Instalador v4: faltan funciones (%d, %d)", r1,
              r2);
     avisar(msg);
     return 0;
@@ -77,15 +114,8 @@ int main(void) {
   int ini = ((int (*)(void))f_init)();
   anotar("initialize devolvio", ini);
   if (ini != 0) {
-    snprintf(msg, sizeof(msg), "Instalador v3: initialize fallo (0x%x)",
+    snprintf(msg, sizeof(msg), "Instalador v4: initialize fallo (0x%x)",
              (unsigned int)ini);
-    avisar(msg);
-    return 0;
-  }
-
-  if (tb < 0 && ta < 0) {
-    snprintf(msg, sizeof(msg),
-             "Instalador v3: no existe el pkg en /data/pkg (tam=%ld)", tb);
     avisar(msg);
     return 0;
   }
@@ -98,9 +128,8 @@ int main(void) {
     anotar("AppInstallPkg /data devolvio", rb);
   }
 
-  snprintf(msg, sizeof(msg),
-           "Instalador v3: tam=%ld user=0x%x data=0x%x", tb >= 0 ? tb : ta,
-           (unsigned int)ra, (unsigned int)rb);
+  snprintf(msg, sizeof(msg), "Instalador v4: tam=%ld user=0x%x data=0x%x",
+           tb >= 0 ? tb : ta, (unsigned int)ra, (unsigned int)rb);
   avisar(msg);
   return 0;
 }
