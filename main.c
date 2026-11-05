@@ -2,6 +2,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <dirent.h>
+#include <errno.h>
+#include <unistd.h>
 
 #define NOMBRE "ps4-usb-prueba.pkg"
 #define RUTA_A "/user/data/pkg/" NOMBRE
@@ -91,11 +94,54 @@ static int resolver(int h, const char *a, const char *b, void **fn) {
   return -1;
 }
 
+static void sonda_externo(void) {
+  char msg[400];
+  char lista[200];
+  size_t n = 0;
+  lista[0] = 0;
+  DIR *d = opendir("/mnt");
+  if (!d) {
+    snprintf(msg, sizeof(msg), "sonda: no abre /mnt (errno=%d)", errno);
+    avisar(msg);
+  } else {
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+      if (e->d_name[0] == '.') continue;
+      size_t l = strlen(e->d_name);
+      if (n + l + 2 < sizeof(lista)) {
+        memcpy(lista + n, e->d_name, l);
+        n += l;
+        lista[n++] = ' ';
+        lista[n] = 0;
+      }
+    }
+    closedir(d);
+    snprintf(msg, sizeof(msg), "sonda: /mnt contiene: %s", lista);
+    avisar(msg);
+  }
+  const char *rutas[2] = {"/mnt/ext0/ps4-payload-prueba.txt",
+                          "/mnt/ext1/ps4-payload-prueba.txt"};
+  for (int i = 0; i < 2; i++) {
+    FILE *t = fopen(rutas[i], "wb");
+    if (t) {
+      fwrite("ok", 1, 2, t);
+      fclose(t);
+      unlink(rutas[i]);
+      snprintf(msg, sizeof(msg), "sonda: SI escribo en %s", rutas[i]);
+    } else {
+      snprintf(msg, sizeof(msg), "sonda: NO escribo en %s (errno=%d)", rutas[i],
+               errno);
+    }
+    avisar(msg);
+  }
+}
+
 int main(void) {
   char msg[400];
   int res = 0;
 
   anotar("instalador v6 (BGFT) arranco", 0);
+  sonda_externo();
 
   long ta = tamano(RUTA_A);
   long tb = tamano(RUTA_B);
