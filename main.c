@@ -9,37 +9,11 @@ typedef struct {
   char message[3075];
 } notify_request_t;
 
-typedef struct {
-  const char *uri;
-  const char *ex_uri;
-  const char *playgo_scenario_id;
-  const char *content_id;
-  const char *content_name;
-  const char *icon_url;
-} meta_info_t;
-
-typedef struct {
-  char content_id[48];
-  int type;
-  int platform;
-} pkg_info_t;
-
-typedef struct {
-  char languages[30][8];
-  char playgo_scenario_ids[64][3];
-  char content_ids[64][48];
-  unsigned char unknown[6480];
-} playgo_info_t;
-
 int sceKernelSendNotificationRequest(int dev, notify_request_t *req,
                                      size_t size, int blocking);
 int sceKernelLoadStartModule(const char *path, size_t argc, const void *argv,
                              unsigned int flags, const void *opt, int *res);
 int sceKernelDlsym(int handle, const char *symbol, void **addr);
-
-static meta_info_t g_meta;
-static pkg_info_t g_pkg;
-static playgo_info_t g_playgo;
 
 static void anotar(const char *txt, long valor) {
   FILE *f = fopen("/data/ps4-payload.log", "a");
@@ -61,7 +35,7 @@ int main(void) {
   char msg[300];
   int res = 0;
 
-  anotar("instalador arranco", 0);
+  anotar("instalador v2 arranco", 0);
 
   int h = sceKernelLoadStartModule("/system/common/lib/libSceAppInstUtil.sprx",
                                    0, NULL, 0, NULL, &res);
@@ -76,11 +50,12 @@ int main(void) {
   void *f_init = NULL;
   void *f_inst = NULL;
   int r1 = sceKernelDlsym(h, "sceAppInstUtilInitialize", &f_init);
-  int r2 = sceKernelDlsym(h, "sceAppInstUtilInstallByPackage", &f_inst);
+  int r2 = sceKernelDlsym(h, "sceAppInstUtilAppInstallPkg", &f_inst);
   anotar("dlsym initialize", r1);
-  anotar("dlsym install", r2);
+  anotar("dlsym AppInstallPkg", r2);
   if (r1 != 0 || f_init == NULL || r2 != 0 || f_inst == NULL) {
-    snprintf(msg, sizeof(msg), "Instalador: faltan funciones (%d, %d)", r1, r2);
+    snprintf(msg, sizeof(msg), "Instalador v2: faltan funciones (%d, %d)", r1,
+             r2);
     avisar(msg);
     return 0;
   }
@@ -88,30 +63,16 @@ int main(void) {
   int ini = ((int (*)(void))f_init)();
   anotar("initialize devolvio", ini);
   if (ini != 0) {
-    snprintf(msg, sizeof(msg), "Instalador: initialize fallo (0x%x)",
+    snprintf(msg, sizeof(msg), "Instalador v2: initialize fallo (0x%x)",
              (unsigned int)ini);
     avisar(msg);
     return 0;
   }
 
-  memset(&g_meta, 0, sizeof(g_meta));
-  memset(&g_pkg, 0, sizeof(g_pkg));
-  memset(&g_playgo, 0, sizeof(g_playgo));
-  g_meta.uri = PKG_RUTA;
-  g_meta.content_id = "";
+  int ret = ((int (*)(const char *, int))f_inst)(PKG_RUTA, 0);
+  anotar("AppInstallPkg devolvio", ret);
 
-  int ret = ((int (*)(meta_info_t *, pkg_info_t *, playgo_info_t *))f_inst)(
-      &g_meta, &g_pkg, &g_playgo);
-  anotar("install devolvio", ret);
-  g_pkg.content_id[47] = 0;
-  FILE *f = fopen("/data/ps4-payload.log", "a");
-  if (f) {
-    fprintf(f, "content_id: %s\n", g_pkg.content_id);
-    fclose(f);
-  }
-
-  snprintf(msg, sizeof(msg), "Instalador: ret=0x%x id=%s", (unsigned int)ret,
-           g_pkg.content_id);
+  snprintf(msg, sizeof(msg), "Instalador v2: ret=0x%x", (unsigned int)ret);
   avisar(msg);
   return 0;
 }
