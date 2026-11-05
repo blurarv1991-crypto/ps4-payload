@@ -1,0 +1,34 @@
+name: Payload
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Dependencias
+        run: sudo apt-get update && sudo apt-get install -y bash git make clang-18 lld-18
+
+      - name: Bajar el SDK
+        run: git clone --depth 1 https://github.com/ps4-payload-dev/sdk /tmp/sdk
+
+      - name: Instalar el SDK
+        run: |
+          cd /tmp/sdk
+          sudo make DESTDIR=/opt/ps4-payload-sdk install
+
+      - name: Compilar el sample
+        run: |
+          export PS4_PAYLOAD_SDK=/opt/ps4-payload-sdk
+          make -C /tmp/sdk/samples/hello_stdio
+          mkdir -p salida
+          cp /tmp/sdk/samples/hello_stdio/*.elf salida/
+          ls -la salida
+
+      - name: Subir el .elf
+        uses: actions/upload-artifact@v4
+        with:
+          name: payload-elf
+          path: salida/*.elf
