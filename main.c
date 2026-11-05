@@ -95,14 +95,14 @@ int main(void) {
   char msg[400];
   int res = 0;
 
-  anotar("instalador v5 (BGFT) arranco", 0);
+  anotar("instalador v6 (BGFT) arranco", 0);
 
   long ta = tamano(RUTA_A);
   long tb = tamano(RUTA_B);
   anotar("tamano /user/data/pkg", ta);
   anotar("tamano /data/pkg", tb);
   if (ta < 0 && tb < 0) {
-    avisar("v5: no existe ps4-usb-prueba.pkg en /data/pkg");
+    avisar("v6: no existe ps4-usb-prueba.pkg en /data/pkg");
     return 0;
   }
   const char *ruta = (ta >= 0) ? RUTA_A : RUTA_B;
@@ -112,7 +112,7 @@ int main(void) {
                                    0, NULL, 0, NULL, &res);
   anotar("cargar AppInstUtil", h);
   if (h < 0) {
-    snprintf(msg, sizeof(msg), "v5: no cargo AppInstUtil (0x%x)",
+    snprintf(msg, sizeof(msg), "v6: no cargo AppInstUtil (0x%x)",
              (unsigned int)h);
     avisar(msg);
     return 0;
@@ -123,14 +123,14 @@ int main(void) {
       resolver(h, "sceAppInstUtilGetTitleIdFromPkg", NULL, &f_tid) ||
       resolver(h, "sceAppInstUtilGetPrimaryAppSlot", NULL, &f_slot) ||
       resolver(h, "sceAppInstUtilAppPrepareOverwritePkg", NULL, &f_over)) {
-    avisar("v5: faltan funciones de AppInstUtil (mira el log)");
+    avisar("v6: faltan funciones de AppInstUtil (mira el log)");
     return 0;
   }
 
   int ini = ((int (*)(void))f_init)();
   anotar("initialize devolvio", ini);
   if (ini != 0) {
-    snprintf(msg, sizeof(msg), "v5: initialize fallo (0x%x)",
+    snprintf(msg, sizeof(msg), "v6: initialize fallo (0x%x)",
              (unsigned int)ini);
     avisar(msg);
     return 0;
@@ -143,7 +143,7 @@ int main(void) {
                                                          &is_app);
   anotar("GetTitleIdFromPkg devolvio", rt);
   if (rt != 0) {
-    snprintf(msg, sizeof(msg), "v5: no pudo leer el pkg (0x%x)",
+    snprintf(msg, sizeof(msg), "v6: no pudo leer el pkg (0x%x)",
              (unsigned int)rt);
     avisar(msg);
     return 0;
@@ -157,7 +157,7 @@ int main(void) {
     if ((unsigned int)rs == 0x80A3000Eu) {
       slot = 0;
     } else {
-      snprintf(msg, sizeof(msg), "v5: slot fallo (0x%x)", (unsigned int)rs);
+      snprintf(msg, sizeof(msg), "v6: slot fallo (0x%x)", (unsigned int)rs);
       avisar(msg);
       return 0;
     }
@@ -173,7 +173,7 @@ int main(void) {
                                     NULL, 0, NULL, &res);
   anotar("cargar Bgft", hb);
   if (hb < 0) {
-    snprintf(msg, sizeof(msg), "v5: no cargo Bgft (0x%x)", (unsigned int)hb);
+    snprintf(msg, sizeof(msg), "v6: no cargo Bgft (0x%x)", (unsigned int)hb);
     avisar(msg);
     return 0;
   }
@@ -184,7 +184,7 @@ int main(void) {
                "sceBgftServiceIntDownloadRegisterTaskByStorageEx", &f_breg) ||
       resolver(hb, "sceBgftDownloadStartTask",
                "sceBgftServiceIntDownloadStartTask", &f_bstart)) {
-    avisar("v5: faltan funciones de Bgft (mira el log)");
+    avisar("v6: faltan funciones de Bgft (mira el log)");
     return 0;
   }
 
@@ -193,7 +193,7 @@ int main(void) {
   ip.size = 0x100000;
   ip.mem = malloc(ip.size);
   if (!ip.mem) {
-    avisar("v5: sin memoria para Bgft");
+    avisar("v6: sin memoria para Bgft");
     return 0;
   }
   memset(ip.mem, 0, ip.size);
@@ -201,9 +201,9 @@ int main(void) {
   int rbi = ((int (*)(bgft_init_params_t *))f_binit)(&ip);
   anotar("Bgft init devolvio", rbi);
   if (rbi != 0) {
-    snprintf(msg, sizeof(msg), "v5: Bgft init fallo (0x%x)", (unsigned int)rbi);
-    avisar(msg);
-    return 0;
+    /* Si el instalador ya corrio antes en este arranque, Bgft puede seguir
+       iniciado y devolver error aqui. No paramos: probamos a registrar igual. */
+    anotar("Bgft init fallo, sigo igual", rbi);
   }
 
   const char *nombre = NOMBRE;
@@ -223,8 +223,8 @@ int main(void) {
   anotar("Bgft registrar devolvio", rr);
   anotar("task id", task);
   if (rr != 0) {
-    snprintf(msg, sizeof(msg), "v5: registrar fallo (0x%x) id=%s",
-             (unsigned int)rr, title_id);
+    snprintf(msg, sizeof(msg), "v6: registrar fallo (0x%x) init=0x%x id=%s",
+             (unsigned int)rr, (unsigned int)rbi, title_id);
     avisar(msg);
     return 0;
   }
@@ -232,7 +232,7 @@ int main(void) {
   int rst = ((int (*)(int))f_bstart)(task);
   anotar("Bgft start devolvio", rst);
 
-  snprintf(msg, sizeof(msg), "v5: id=%s tam=%ld slot=%u reg=0x%x start=0x%x",
+  snprintf(msg, sizeof(msg), "v6: id=%s tam=%ld slot=%u reg=0x%x start=0x%x",
            title_id, tam, slot, (unsigned int)rr, (unsigned int)rst);
   avisar(msg);
   return 0;
