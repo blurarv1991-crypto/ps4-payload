@@ -25,7 +25,15 @@ jobs:
           make -C /tmp/sdk/samples/hello_stdio
           mkdir -p salida
           cp /tmp/sdk/samples/hello_stdio/*.elf salida/
-          ls -la salida
+
+      - name: Mostrar el sample
+        run: |
+          cd /tmp/sdk/samples/hello_stdio
+          ls -la
+          echo "===== MAKEFILE ====="
+          cat Makefile
+          echo "===== CODIGO ====="
+          for f in *.c; do echo "--- $f ---"; cat "$f"; done
 
       - name: Subir el .elf
         uses: actions/upload-artifact@v4
