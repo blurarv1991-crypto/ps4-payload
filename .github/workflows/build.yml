@@ -8,6 +8,9 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
+      - name: Bajar mi repo
+        uses: actions/checkout@v4
+
       - name: Dependencias
         run: sudo apt-get update && sudo apt-get install -y bash git make clang-18 lld-18
 
@@ -19,24 +22,25 @@ jobs:
           cd /tmp/sdk
           sudo make DESTDIR=/opt/ps4-payload-sdk install
 
-      - name: Compilar el sample
+      - name: Compilar mi payload
         run: |
           export PS4_PAYLOAD_SDK=/opt/ps4-payload-sdk
-          make -C /tmp/sdk/samples/hello_stdio
+          ok=0
+          for l in "-lkernel_sys" "-lkernel" "-lSceLibcInternal" ""; do
+            echo "=== Probando LDLIBS=$l ==="
+            make clean
+            if make LDLIBS="$l"; then
+              echo "=== OK con LDLIBS=$l ==="
+              ok=1
+              break
+            fi
+          done
+          test "$ok" = 1
           mkdir -p salida
-          cp /tmp/sdk/samples/hello_stdio/*.elf salida/
-
-      - name: Mostrar el sample
-        run: |
-          cd /tmp/sdk/samples/hello_stdio
-          ls -la
-          echo "===== MAKEFILE ====="
-          cat Makefile
-          echo "===== CODIGO ====="
-          for f in *.c; do echo "--- $f ---"; cat "$f"; done
+          cp aviso.elf salida/
 
       - name: Subir el .elf
         uses: actions/upload-artifact@v4
         with:
-          name: payload-elf
-          path: salida/*.elf
+          name: aviso-elf
+          path: salida/aviso.elf
