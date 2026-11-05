@@ -2,13 +2,14 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <dirent.h>
-#include <errno.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #define NOMBRE "ps4-usb-prueba.pkg"
 #define RUTA_A "/user/data/pkg/" NOMBRE
 #define RUTA_B "/data/pkg/" NOMBRE
+#define DIR_EXT "/mnt/ext0/pkg"
+#define RUTA_EXT DIR_EXT "/" NOMBRE
 
 typedef struct {
   char pad[45];
@@ -94,71 +95,96 @@ static int resolver(int h, const char *a, const char *b, void **fn) {
   return -1;
 }
 
-static void sonda_externo(void) {
-  char msg[400];
-  char lista[200];
-  size_t n = 0;
-  lista[0] = 0;
-  DIR *d = opendir("/mnt");
-  if (!d) {
-    snprintf(msg, sizeof(msg), "sonda: no abre /mnt (errno=%d)", errno);
-    avisar(msg);
-  } else {
-    struct dirent *e;
-    while ((e = readdir(d)) != NULL) {
-      if (e->d_name[0] == '.') continue;
-      size_t l = strlen(e->d_name);
-      if (n + l + 2 < sizeof(lista)) {
-        memcpy(lista + n, e->d_name, l);
-        n += l;
-        lista[n++] = ' ';
-        lista[n] = 0;
-      }
-    }
-    closedir(d);
-    snprintf(msg, sizeof(msg), "sonda: /mnt contiene: %s", lista);
-    avisar(msg);
+static int copiar(const char *origen, const char *destino, long total) {
+  FILE *i = fopen(origen, "rb");
+  if (!i) return -1;
+  FILE *o = fopen(destino, "wb");
+  if (!o) {
+    fclose(i);
+    return -2;
   }
-  const char *rutas[2] = {"/mnt/ext0/ps4-payload-prueba.txt",
-                          "/mnt/ext1/ps4-payload-prueba.txt"};
-  for (int i = 0; i < 2; i++) {
-    FILE *t = fopen(rutas[i], "wb");
-    if (t) {
-      fwrite("ok", 1, 2, t);
-      fclose(t);
-      unlink(rutas[i]);
-      snprintf(msg, sizeof(msg), "sonda: SI escribo en %s", rutas[i]);
-    } else {
-      snprintf(msg, sizeof(msg), "sonda: NO escribo en %s (errno=%d)", rutas[i],
-               errno);
+  static char buf[1048576];
+  long hecho = 0;
+  long aviso = 1073741824L;
+  size_t n;
+  int ok = 1;
+  while ((n = fread(buf, 1, sizeof(buf), i)) > 0) {
+    if (fwrite(buf, 1, n, o) != n) {
+      ok = 0;
+      break;
     }
-    avisar(msg);
+    hecho += (long)n;
+    if (hecho >= aviso) {
+      char m[120];
+      snprintf(m, sizeof(m), "v7: copiando al disco externo... %ld de %ld MB",
+               hecho / 1048576, total / 1048576);
+      avisar(m);
+      aviso += 1073741824L;
+    }
   }
+  fclose(i);
+  if (fclose(o) != 0) ok = 0;
+  anotar("copiado bytes", hecho);
+  if (!ok || hecho != total) {
+    unlink(destino);
+    return -3;
+  }
+  return 0;
 }
 
 int main(void) {
   char msg[400];
   int res = 0;
 
-  anotar("instalador v6 (BGFT) arranco", 0);
-  sonda_externo();
+  anotar("instalador v7 (BGFT) arranco", 0);
 
   long ta = tamano(RUTA_A);
   long tb = tamano(RUTA_B);
+  long te = tamano(RUTA_EXT);
   anotar("tamano /user/data/pkg", ta);
   anotar("tamano /data/pkg", tb);
-  if (ta < 0 && tb < 0) {
-    avisar("v6: no existe ps4-usb-prueba.pkg en /data/pkg");
+  anotar("tamano disco externo", te);
+
+  const char *origen = NULL;
+  long tam = 0;
+  if (ta >= 0) {
+    origen = RUTA_A;
+    tam = ta;
+  } else if (tb >= 0) {
+    origen = RUTA_B;
+    tam = tb;
+  }
+
+  const char *ruta = NULL;
+  const char *a_borrar = NULL;
+  if (origen) {
+    mkdir(DIR_EXT, 0777);
+    avisar("v7: copiando el .pkg al disco externo...");
+    int rc = copiar(origen, RUTA_EXT, tam);
+    anotar("copiar al externo devolvio", rc);
+    if (rc == 0) {
+      ruta = RUTA_EXT;
+      a_borrar = origen;
+      avisar("v7: copiado al disco externo, instalando");
+    } else {
+      snprintf(msg, sizeof(msg),
+               "v7: no pude copiar al externo (%d), instalo desde el interno", rc);
+      avisar(msg);
+      ruta = origen;
+    }
+  } else if (te >= 0) {
+    ruta = RUTA_EXT;
+    tam = te;
+  } else {
+    avisar("v7: no existe ps4-usb-prueba.pkg en /data/pkg ni en el disco externo");
     return 0;
   }
-  const char *ruta = (ta >= 0) ? RUTA_A : RUTA_B;
-  long tam = (ta >= 0) ? ta : tb;
 
   int h = sceKernelLoadStartModule("/system/common/lib/libSceAppInstUtil.sprx",
                                    0, NULL, 0, NULL, &res);
   anotar("cargar AppInstUtil", h);
   if (h < 0) {
-    snprintf(msg, sizeof(msg), "v6: no cargo AppInstUtil (0x%x)",
+    snprintf(msg, sizeof(msg), "v7: no cargo AppInstUtil (0x%x)",
              (unsigned int)h);
     avisar(msg);
     return 0;
@@ -169,14 +195,14 @@ int main(void) {
       resolver(h, "sceAppInstUtilGetTitleIdFromPkg", NULL, &f_tid) ||
       resolver(h, "sceAppInstUtilGetPrimaryAppSlot", NULL, &f_slot) ||
       resolver(h, "sceAppInstUtilAppPrepareOverwritePkg", NULL, &f_over)) {
-    avisar("v6: faltan funciones de AppInstUtil (mira el log)");
+    avisar("v7: faltan funciones de AppInstUtil (mira el log)");
     return 0;
   }
 
   int ini = ((int (*)(void))f_init)();
   anotar("initialize devolvio", ini);
   if (ini != 0) {
-    snprintf(msg, sizeof(msg), "v6: initialize fallo (0x%x)",
+    snprintf(msg, sizeof(msg), "v7: initialize fallo (0x%x)",
              (unsigned int)ini);
     avisar(msg);
     return 0;
@@ -189,7 +215,7 @@ int main(void) {
                                                          &is_app);
   anotar("GetTitleIdFromPkg devolvio", rt);
   if (rt != 0) {
-    snprintf(msg, sizeof(msg), "v6: no pudo leer el pkg (0x%x)",
+    snprintf(msg, sizeof(msg), "v7: no pudo leer el pkg (0x%x)",
              (unsigned int)rt);
     avisar(msg);
     return 0;
@@ -203,7 +229,7 @@ int main(void) {
     if ((unsigned int)rs == 0x80A3000Eu) {
       slot = 0;
     } else {
-      snprintf(msg, sizeof(msg), "v6: slot fallo (0x%x)", (unsigned int)rs);
+      snprintf(msg, sizeof(msg), "v7: slot fallo (0x%x)", (unsigned int)rs);
       avisar(msg);
       return 0;
     }
@@ -219,7 +245,7 @@ int main(void) {
                                     NULL, 0, NULL, &res);
   anotar("cargar Bgft", hb);
   if (hb < 0) {
-    snprintf(msg, sizeof(msg), "v6: no cargo Bgft (0x%x)", (unsigned int)hb);
+    snprintf(msg, sizeof(msg), "v7: no cargo Bgft (0x%x)", (unsigned int)hb);
     avisar(msg);
     return 0;
   }
@@ -230,7 +256,7 @@ int main(void) {
                "sceBgftServiceIntDownloadRegisterTaskByStorageEx", &f_breg) ||
       resolver(hb, "sceBgftDownloadStartTask",
                "sceBgftServiceIntDownloadStartTask", &f_bstart)) {
-    avisar("v6: faltan funciones de Bgft (mira el log)");
+    avisar("v7: faltan funciones de Bgft (mira el log)");
     return 0;
   }
 
@@ -239,7 +265,7 @@ int main(void) {
   ip.size = 0x100000;
   ip.mem = malloc(ip.size);
   if (!ip.mem) {
-    avisar("v6: sin memoria para Bgft");
+    avisar("v7: sin memoria para Bgft");
     return 0;
   }
   memset(ip.mem, 0, ip.size);
@@ -269,7 +295,7 @@ int main(void) {
   anotar("Bgft registrar devolvio", rr);
   anotar("task id", task);
   if (rr != 0) {
-    snprintf(msg, sizeof(msg), "v6: registrar fallo (0x%x) init=0x%x id=%s",
+    snprintf(msg, sizeof(msg), "v7: registrar fallo (0x%x) init=0x%x id=%s",
              (unsigned int)rr, (unsigned int)rbi, title_id);
     avisar(msg);
     return 0;
@@ -277,8 +303,12 @@ int main(void) {
 
   int rst = ((int (*)(int))f_bstart)(task);
   anotar("Bgft start devolvio", rst);
+  if (a_borrar && rr == 0 && rst == 0) {
+    int ru = unlink(a_borrar);
+    anotar("borre el original del disco interno", ru);
+  }
 
-  snprintf(msg, sizeof(msg), "v6: id=%s tam=%ld slot=%u reg=0x%x start=0x%x",
+  snprintf(msg, sizeof(msg), "v7: id=%s tam=%ld slot=%u reg=0x%x start=0x%x",
            title_id, tam, slot, (unsigned int)rr, (unsigned int)rst);
   avisar(msg);
   return 0;
