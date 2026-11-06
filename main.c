@@ -1,23 +1,15 @@
-/* REPO ps4-payload: instalador v14 (prueba etapa 1: instala desde un mini servidor web interno) */
+/* REPO ps4-payload: instalador v15 (instala el .pkg de /data/pkg por ruta, sin servidor) */
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <errno.h>
 #include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 
 #define NOMBRE "ps4-usb-prueba.pkg"
 #define RUTA_A "/user/data/pkg/" NOMBRE
 #define RUTA_B "/data/pkg/" NOMBRE
-#define PUERTO 9095
-#define PUERTOS_PROBAR 5
-static int g_puerto = PUERTO;
 
 typedef struct {
   char pad[45];
@@ -104,255 +96,18 @@ static int resolver(int h, const char *a, const char *b, void **fn) {
 }
 
 
-/* ---------- Mini servidor web (solo para la prueba de la etapa 1) ----------
-   Sirve el .pkg por http://127.0.0.1:PUERTO con soporte de Range.
-   Atiende una conexion a la vez; cada respuesta cierra la conexion. */
-
-static long g_servido = 0;
-static int g_conexiones = 0;
-
-static int mandar(int c, const char *d, long n) {
-  long hecho = 0;
-  while (hecho < n) {
-    long r = send(c, d + hecho, (size_t)(n - hecho), 0);
-    if (r <= 0) return -1;
-    hecho += r;
-  }
-  return 0;
-}
-
-static const char *buscar_ci(const char *txt, const char *clave) {
-  size_t lc = strlen(clave);
-  for (const char *p = txt; *p; p++) {
-    size_t i = 0;
-    while (i < lc && p[i]) {
-      char a = p[i], b = clave[i];
-      if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
-      if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
-      if (a != b) break;
-      i++;
-    }
-    if (i == lc) return p;
-  }
-  return NULL;
-}
-
-static void atender(int c, const char *ruta, long total) {
-  char req[2048];
-  int n = 0;
-  while (n < (int)sizeof(req) - 1) {
-    int r = (int)recv(c, req + n, sizeof(req) - 1 - n, 0);
-    if (r <= 0) break;
-    n += r;
-    req[n] = 0;
-    if (strstr(req, "\r\n\r\n")) break;
-  }
-  if (n <= 0) return;
-  req[n] = 0;
-
-  int es_head = (strncmp(req, "HEAD", 4) == 0);
-  long ini = 0, fin = total - 1;
-  int parcial = 0;
-  const char *rg = buscar_ci(req, "range: bytes=");
-  if (rg) {
-    rg += 13;
-    if (*rg >= '0' && *rg <= '9') {
-      char *fp = NULL;
-      ini = strtol(rg, &fp, 10);
-      if (fp && *fp == '-') {
-        fp++;
-        if (*fp >= '0' && *fp <= '9') fin = strtol(fp, NULL, 10);
-      }
-      if (fin > total - 1) fin = total - 1;
-      if (ini < 0 || ini > fin) {
-        ini = 0;
-        fin = total - 1;
-      } else {
-        parcial = 1;
-      }
-    }
-  }
-  long largo = fin - ini + 1;
-
-  char cab[400];
-  int lc;
-  if (parcial) {
-    lc = snprintf(cab, sizeof(cab),
-                  "HTTP/1.1 206 Partial Content\r\n"
-                  "Content-Type: application/octet-stream\r\n"
-                  "Accept-Ranges: bytes\r\n"
-                  "Content-Range: bytes %ld-%ld/%ld\r\n"
-                  "Content-Length: %ld\r\n"
-                  "Connection: close\r\n\r\n",
-                  ini, fin, total, largo);
-  } else {
-    lc = snprintf(cab, sizeof(cab),
-                  "HTTP/1.1 200 OK\r\n"
-                  "Content-Type: application/octet-stream\r\n"
-                  "Accept-Ranges: bytes\r\n"
-                  "Content-Length: %ld\r\n"
-                  "Connection: close\r\n\r\n",
-                  largo);
-  }
-  anotar(es_head ? "pedido HEAD, ini" : "pedido GET, ini", ini);
-  anotar("pedido fin", fin);
-  if (mandar(c, cab, lc) != 0) return;
-  if (es_head) return;
-
-  FILE *f = fopen(ruta, "rb");
-  if (!f) return;
-  fseek(f, ini, SEEK_SET);
-  static char buf[262144];
-  long falta = largo;
-  while (falta > 0) {
-    size_t quiero = falta > (long)sizeof(buf) ? sizeof(buf) : (size_t)falta;
-    size_t got = fread(buf, 1, quiero, f);
-    if (got == 0) break;
-    if (mandar(c, buf, (long)got) != 0) break;
-    falta -= (long)got;
-    g_servido += (long)got;
-  }
-  fclose(f);
-}
-
-
-static int obtener_ip(char *out, size_t n) {
-  int u = socket(AF_INET, SOCK_DGRAM, 0);
-  if (u < 0) return -1;
-  struct sockaddr_in d;
-  memset(&d, 0, sizeof(d));
-  d.sin_family = AF_INET;
-  d.sin_port = htons(53);
-  d.sin_addr.s_addr = inet_addr("8.8.8.8");
-  if (connect(u, (struct sockaddr *)&d, sizeof(d)) != 0) {
-    close(u);
-    return -1;
-  }
-  struct sockaddr_in l;
-  socklen_t ll = sizeof(l);
-  memset(&l, 0, sizeof(l));
-  if (getsockname(u, (struct sockaddr *)&l, &ll) != 0) {
-    close(u);
-    return -1;
-  }
-  close(u);
-  snprintf(out, n, "%s", inet_ntoa(l.sin_addr));
-  return 0;
-}
-
-static int abrir_servidor(int puerto) {
-  int s = socket(AF_INET, SOCK_STREAM, 0);
-  if (s < 0) {
-    anotar("socket fallo errno", errno);
-    return -1;
-  }
-  int uno = 1;
-  setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &uno, sizeof(uno));
-  struct sockaddr_in a;
-  memset(&a, 0, sizeof(a));
-  a.sin_family = AF_INET;
-  a.sin_port = htons(puerto);
-  a.sin_addr.s_addr = htonl(INADDR_ANY);
-  if (bind(s, (struct sockaddr *)&a, sizeof(a)) != 0) {
-    anotar("bind fallo errno", errno);
-    close(s);
-    return -1;
-  }
-  if (listen(s, 16) != 0) {
-    anotar("listen fallo errno", errno);
-    close(s);
-    return -1;
-  }
-  int fl = fcntl(s, F_GETFL, 0);
-  fcntl(s, F_SETFL, fl | O_NONBLOCK);
-  return s;
-}
-
-static void servir(int s, const char *ruta, long total) {
-  long ocioso = 0; /* milisegundos sin actividad */
-  while (1) {
-    struct sockaddr_in ca;
-    socklen_t cl = sizeof(ca);
-    int c = accept(s, (struct sockaddr *)&ca, &cl);
-    if (c >= 0) {
-      int fl = fcntl(c, F_GETFL, 0);
-      fcntl(c, F_SETFL, fl & ~O_NONBLOCK);
-      struct timeval tv;
-      tv.tv_sec = 15;
-      tv.tv_usec = 0;
-      setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-      setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-      g_conexiones++;
-      if (g_conexiones == 1) avisar("v14: el instalador se conecto al servidor");
-      atender(c, ruta, total);
-      close(c);
-      ocioso = 0;
-    } else {
-      usleep(20000);
-      ocioso += 20;
-    }
-    if (g_conexiones == 0 && ocioso > 40000) break;
-    if (g_conexiones > 0 && ocioso > 120000) break;
-  }
-  close(s);
-}
-
-
-/* Lee el content ID de la cabecera del .pkg (magic 7F 43 4E 54, ID en 0x40, 36 bytes) */
-static int leer_content_id(const char *ruta, char *out, size_t n) {
-  unsigned char h[0x64];
-  FILE *f = fopen(ruta, "rb");
-  if (!f) return -1;
-  size_t got = fread(h, 1, sizeof(h), f);
-  fclose(f);
-  if (got < sizeof(h)) return -2;
-  if (!(h[0] == 0x7F && h[1] == 0x43 && h[2] == 0x4E && h[3] == 0x54)) return -3;
-  if (n < 37) return -4;
-  memcpy(out, h + 0x40, 36);
-  out[36] = 0;
-  return 0;
-}
-
-
-/* Pide a la PS4 el usuario que tiene la sesion abierta (devuelve -1 si falla) */
-static int obtener_usuario(void) {
-  int res = 0;
-  int hu = sceKernelLoadStartModule("/system/common/lib/libSceUserService.sprx",
-                                    0, NULL, 0, NULL, &res);
-  anotar("cargar UserService", hu);
-  if (hu < 0) return -1;
-  void *f_ui = NULL, *f_gf = NULL;
-  if (resolver(hu, "sceUserServiceInitialize", NULL, &f_ui) ||
-      resolver(hu, "sceUserServiceGetForegroundUser", NULL, &f_gf)) {
-    return -1;
-  }
-  int uid = -1;
-  int r = ((int (*)(int *))f_gf)(&uid);
-  anotar("GetForegroundUser (1) devolvio", r);
-  if (r != 0) {
-    int ri = ((int (*)(void *))f_ui)(NULL);
-    anotar("UserService Initialize devolvio", ri);
-    uid = -1;
-    r = ((int (*)(int *))f_gf)(&uid);
-    anotar("GetForegroundUser (2) devolvio", r);
-  }
-  anotar("usuario en primer plano", uid);
-  if (r != 0 || uid <= 0) return -1;
-  return uid;
-}
-
 int main(void) {
   char msg[400];
   int res = 0;
 
-  anotar("instalador v14 (BGFT) arranco", 0);
+  anotar("instalador v15 (BGFT) arranco", 0);
 
   long ta = tamano(RUTA_A);
   long tb = tamano(RUTA_B);
   anotar("tamano /user/data/pkg", ta);
   anotar("tamano /data/pkg", tb);
   if (ta < 0 && tb < 0) {
-    avisar("v14: no existe ps4-usb-prueba.pkg en /data/pkg");
+    avisar("v15: no existe ps4-usb-prueba.pkg en /data/pkg");
     return 0;
   }
   const char *ruta = (ta >= 0) ? RUTA_A : RUTA_B;
@@ -362,7 +117,7 @@ int main(void) {
                                    0, NULL, 0, NULL, &res);
   anotar("cargar AppInstUtil", h);
   if (h < 0) {
-    snprintf(msg, sizeof(msg), "v14: no cargo AppInstUtil (0x%x)",
+    snprintf(msg, sizeof(msg), "v15: no cargo AppInstUtil (0x%x)",
              (unsigned int)h);
     avisar(msg);
     return 0;
@@ -373,14 +128,14 @@ int main(void) {
       resolver(h, "sceAppInstUtilGetTitleIdFromPkg", NULL, &f_tid) ||
       resolver(h, "sceAppInstUtilGetPrimaryAppSlot", NULL, &f_slot) ||
       resolver(h, "sceAppInstUtilAppPrepareOverwritePkg", NULL, &f_over)) {
-    avisar("v14: faltan funciones de AppInstUtil (mira el log)");
+    avisar("v15: faltan funciones de AppInstUtil (mira el log)");
     return 0;
   }
 
   int ini = ((int (*)(void))f_init)();
   anotar("initialize devolvio", ini);
   if (ini != 0) {
-    snprintf(msg, sizeof(msg), "v14: initialize fallo (0x%x)",
+    snprintf(msg, sizeof(msg), "v15: initialize fallo (0x%x)",
              (unsigned int)ini);
     avisar(msg);
     return 0;
@@ -393,7 +148,7 @@ int main(void) {
                                                          &is_app);
   anotar("GetTitleIdFromPkg devolvio", rt);
   if (rt != 0) {
-    snprintf(msg, sizeof(msg), "v14: no pudo leer el pkg (0x%x)",
+    snprintf(msg, sizeof(msg), "v15: no pudo leer el pkg (0x%x)",
              (unsigned int)rt);
     avisar(msg);
     return 0;
@@ -405,9 +160,9 @@ int main(void) {
   anotar("GetPrimaryAppSlot devolvio", rs);
   if (rs != 0) {
     if ((unsigned int)rs == 0x80A3000Eu) {
-      slot = 0;
+      slot = 0; /* la app aun no esta instalada */
     } else {
-      snprintf(msg, sizeof(msg), "v14: slot fallo (0x%x)", (unsigned int)rs);
+      snprintf(msg, sizeof(msg), "v15: slot fallo (0x%x)", (unsigned int)rs);
       avisar(msg);
       return 0;
     }
@@ -423,7 +178,7 @@ int main(void) {
                                     NULL, 0, NULL, &res);
   anotar("cargar Bgft", hb);
   if (hb < 0) {
-    snprintf(msg, sizeof(msg), "v14: no cargo Bgft (0x%x)", (unsigned int)hb);
+    snprintf(msg, sizeof(msg), "v15: no cargo Bgft (0x%x)", (unsigned int)hb);
     avisar(msg);
     return 0;
   }
@@ -434,7 +189,7 @@ int main(void) {
                "sceBgftServiceIntDownloadRegisterTaskByStorageEx", &f_breg) ||
       resolver(hb, "sceBgftDownloadStartTask",
                "sceBgftServiceIntDownloadStartTask", &f_bstart)) {
-    avisar("v14: faltan funciones de Bgft (mira el log)");
+    avisar("v15: faltan funciones de Bgft (mira el log)");
     return 0;
   }
 
@@ -443,7 +198,7 @@ int main(void) {
   ip.size = 0x100000;
   ip.mem = malloc(ip.size);
   if (!ip.mem) {
-    avisar("v14: sin memoria para Bgft");
+    avisar("v15: sin memoria para Bgft");
     return 0;
   }
   memset(ip.mem, 0, ip.size);
@@ -451,106 +206,44 @@ int main(void) {
   int rbi = ((int (*)(bgft_init_params_t *))f_binit)(&ip);
   anotar("Bgft init devolvio", rbi);
   if (rbi != 0) {
-    /* Si el instalador ya corrio antes en este arranque, Bgft puede seguir
-       iniciado y devolver error aqui. No paramos: probamos a registrar igual. */
+    /* Si Bgft ya estaba iniciado, devuelve error aqui. No paramos: probamos a registrar igual. */
     anotar("Bgft init fallo, sigo igual", rbi);
   }
 
-  int srv = -1;
-  for (int i = 0; i < PUERTOS_PROBAR && srv < 0; i++) {
-    g_puerto = PUERTO + i;
-    srv = abrir_servidor(g_puerto);
-  }
-  anotar("servidor web (descriptor)", srv);
-  anotar("servidor web (puerto)", g_puerto);
-  if (srv < 0) {
-    avisar("v14: no pude abrir el servidor web interno (mira el log)");
-    return 0;
-  }
-  int uid = obtener_usuario();
-  anotar("user id elegido", uid);
+  bgft_download_param_ex_t dp;
+  memset(&dp, 0, sizeof(dp));
+  dp.param.user_id = 0;
+  dp.param.entitlement_type = 5;
+  dp.param.id = "";
+  dp.param.content_url = ruta;
+  dp.param.content_ex_url = "";
+  dp.param.content_name = NOMBRE;
+  dp.param.icon_path = "";
+  dp.param.sku_id = "";
+  dp.param.option = 0x10000;
+  dp.param.playgo_scenario_id = "0";
+  dp.param.release_date = "";
+  dp.param.package_type = "PS4GD";
+  dp.param.package_sub_type = "";
+  dp.param.package_size = (unsigned long)tam;
+  dp.slot = slot;
 
-  char cid[48];
-  memset(cid, 0, sizeof(cid));
-  int cid_ok = leer_content_id(ruta, cid, sizeof(cid));
-  anotar("content id (0=ok)", cid_ok);
-  if (cid_ok == 0) {
-    anotar(cid, 0);
-  }
-
-  char ipps4[64];
-  memset(ipps4, 0, sizeof(ipps4));
-  int ip_ok = obtener_ip(ipps4, sizeof(ipps4));
-  anotar("ip de la PS4 (0=ok)", ip_ok);
-  if (ip_ok == 0) {
-    anotar(ipps4, 0);
-  }
-
-  char urls[4][160];
-  memset(urls, 0, sizeof(urls));
-  if (ip_ok == 0) {
-    snprintf(urls[0], sizeof(urls[0]), "http://%s:%d/%s", ipps4, g_puerto, NOMBRE);
-    snprintf(urls[2], sizeof(urls[2]), "http://%s:%d/%s", ipps4, g_puerto, NOMBRE);
-  }
-  snprintf(urls[1], sizeof(urls[1]), "http://127.0.0.1:%d/%s", g_puerto, NOMBRE);
-  /* la variante 4 es de control: ruta del archivo, como en la v6 */
-  snprintf(urls[3], sizeof(urls[3]), "%s", ruta);
-
-  const char *nombre = NOMBRE;
   int task = -1;
-  int rr = -1;
-  int variante;
-  for (variante = 1; variante <= 4; variante++) {
-    const char *u = urls[variante - 1];
-    if (u[0] == 0) continue;
-    bgft_download_param_ex_t dp;
-    memset(&dp, 0, sizeof(dp));
-    /* variantes 1 a 3: usuario real; la 4 (control) igual que antes */
-    dp.param.user_id = (variante <= 3 && uid > 0) ? uid : 0;
-    dp.param.entitlement_type = 5;
-    /* variantes 1 y 2: content id; la 3 y la 4: id vacio */
-    dp.param.id = (variante <= 2 && cid_ok == 0) ? cid : "";
-    dp.param.content_url = u;
-    dp.param.content_ex_url = "";
-    dp.param.content_name = nombre;
-    dp.param.icon_path = "";
-    dp.param.sku_id = "";
-    dp.param.option = 0x10000;
-    dp.param.playgo_scenario_id = "0";
-    dp.param.release_date = "";
-    dp.param.package_type = "PS4GD";
-    dp.param.package_sub_type = "";
-    dp.param.package_size = (unsigned long)tam;
-    dp.slot = slot;
-
-    task = -1;
-    rr = ((int (*)(bgft_download_param_ex_t *, int *))f_breg)(&dp, &task);
-    anotar("variante de registro", variante);
-    anotar(u, 0);
-    anotar("user_id usado", (long)dp.param.user_id);
-    anotar("Bgft registrar devolvio", rr);
-    anotar("task id", task);
-    if (rr == 0) break;
-  }
+  int rr = ((int (*)(bgft_download_param_ex_t *, int *))f_breg)(&dp, &task);
+  anotar("Bgft registrar devolvio", rr);
+  anotar("task id", task);
   if (rr != 0) {
-    snprintf(msg, sizeof(msg), "v14: registrar fallo (0x%x) init=0x%x id=%s",
+    snprintf(msg, sizeof(msg), "v15: registrar fallo (0x%x) init=0x%x id=%s",
              (unsigned int)rr, (unsigned int)rbi, title_id);
     avisar(msg);
-    close(srv);
     return 0;
   }
 
   int rst = ((int (*)(int))f_bstart)(task);
   anotar("Bgft start devolvio", rst);
 
-  snprintf(msg, sizeof(msg), "v14: id=%s tam=%ld slot=%u reg=0x%x start=0x%x",
+  snprintf(msg, sizeof(msg), "v15: id=%s tam=%ld slot=%u reg=0x%x start=0x%x",
            title_id, tam, slot, (unsigned int)rr, (unsigned int)rst);
-  avisar(msg);
-
-  servir(srv, ruta, tam);
-  snprintf(msg, sizeof(msg),
-           "v14: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
-           g_conexiones, g_servido, tam);
   avisar(msg);
   return 0;
 }
