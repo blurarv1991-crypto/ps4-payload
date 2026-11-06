@@ -1,4 +1,4 @@
-/* REPO ps4-payload: instalador v11 (prueba etapa 1: instala desde un mini servidor web interno) */
+/* REPO ps4-payload: instalador v12 (prueba etapa 1: instala desde un mini servidor web interno) */
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -215,6 +215,31 @@ static void atender(int c, const char *ruta, long total) {
   fclose(f);
 }
 
+
+static int obtener_ip(char *out, size_t n) {
+  int u = socket(AF_INET, SOCK_DGRAM, 0);
+  if (u < 0) return -1;
+  struct sockaddr_in d;
+  memset(&d, 0, sizeof(d));
+  d.sin_family = AF_INET;
+  d.sin_port = htons(53);
+  d.sin_addr.s_addr = inet_addr("8.8.8.8");
+  if (connect(u, (struct sockaddr *)&d, sizeof(d)) != 0) {
+    close(u);
+    return -1;
+  }
+  struct sockaddr_in l;
+  socklen_t ll = sizeof(l);
+  memset(&l, 0, sizeof(l));
+  if (getsockname(u, (struct sockaddr *)&l, &ll) != 0) {
+    close(u);
+    return -1;
+  }
+  close(u);
+  snprintf(out, n, "%s", inet_ntoa(l.sin_addr));
+  return 0;
+}
+
 static int abrir_servidor(int puerto) {
   int s = socket(AF_INET, SOCK_STREAM, 0);
   if (s < 0) {
@@ -227,7 +252,7 @@ static int abrir_servidor(int puerto) {
   memset(&a, 0, sizeof(a));
   a.sin_family = AF_INET;
   a.sin_port = htons(puerto);
-  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  a.sin_addr.s_addr = htonl(INADDR_ANY);
   if (bind(s, (struct sockaddr *)&a, sizeof(a)) != 0) {
     anotar("bind fallo errno", errno);
     close(s);
@@ -258,7 +283,7 @@ static void servir(int s, const char *ruta, long total) {
       setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
       setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
       g_conexiones++;
-      if (g_conexiones == 1) avisar("v11: el instalador se conecto al servidor");
+      if (g_conexiones == 1) avisar("v12: el instalador se conecto al servidor");
       atender(c, ruta, total);
       close(c);
       ocioso = 0;
@@ -276,14 +301,14 @@ int main(void) {
   char msg[400];
   int res = 0;
 
-  anotar("instalador v11 (BGFT) arranco", 0);
+  anotar("instalador v12 (BGFT) arranco", 0);
 
   long ta = tamano(RUTA_A);
   long tb = tamano(RUTA_B);
   anotar("tamano /user/data/pkg", ta);
   anotar("tamano /data/pkg", tb);
   if (ta < 0 && tb < 0) {
-    avisar("v11: no existe ps4-usb-prueba.pkg en /data/pkg");
+    avisar("v12: no existe ps4-usb-prueba.pkg en /data/pkg");
     return 0;
   }
   const char *ruta = (ta >= 0) ? RUTA_A : RUTA_B;
@@ -293,7 +318,7 @@ int main(void) {
                                    0, NULL, 0, NULL, &res);
   anotar("cargar AppInstUtil", h);
   if (h < 0) {
-    snprintf(msg, sizeof(msg), "v11: no cargo AppInstUtil (0x%x)",
+    snprintf(msg, sizeof(msg), "v12: no cargo AppInstUtil (0x%x)",
              (unsigned int)h);
     avisar(msg);
     return 0;
@@ -304,14 +329,14 @@ int main(void) {
       resolver(h, "sceAppInstUtilGetTitleIdFromPkg", NULL, &f_tid) ||
       resolver(h, "sceAppInstUtilGetPrimaryAppSlot", NULL, &f_slot) ||
       resolver(h, "sceAppInstUtilAppPrepareOverwritePkg", NULL, &f_over)) {
-    avisar("v11: faltan funciones de AppInstUtil (mira el log)");
+    avisar("v12: faltan funciones de AppInstUtil (mira el log)");
     return 0;
   }
 
   int ini = ((int (*)(void))f_init)();
   anotar("initialize devolvio", ini);
   if (ini != 0) {
-    snprintf(msg, sizeof(msg), "v11: initialize fallo (0x%x)",
+    snprintf(msg, sizeof(msg), "v12: initialize fallo (0x%x)",
              (unsigned int)ini);
     avisar(msg);
     return 0;
@@ -324,7 +349,7 @@ int main(void) {
                                                          &is_app);
   anotar("GetTitleIdFromPkg devolvio", rt);
   if (rt != 0) {
-    snprintf(msg, sizeof(msg), "v11: no pudo leer el pkg (0x%x)",
+    snprintf(msg, sizeof(msg), "v12: no pudo leer el pkg (0x%x)",
              (unsigned int)rt);
     avisar(msg);
     return 0;
@@ -338,7 +363,7 @@ int main(void) {
     if ((unsigned int)rs == 0x80A3000Eu) {
       slot = 0;
     } else {
-      snprintf(msg, sizeof(msg), "v11: slot fallo (0x%x)", (unsigned int)rs);
+      snprintf(msg, sizeof(msg), "v12: slot fallo (0x%x)", (unsigned int)rs);
       avisar(msg);
       return 0;
     }
@@ -354,7 +379,7 @@ int main(void) {
                                     NULL, 0, NULL, &res);
   anotar("cargar Bgft", hb);
   if (hb < 0) {
-    snprintf(msg, sizeof(msg), "v11: no cargo Bgft (0x%x)", (unsigned int)hb);
+    snprintf(msg, sizeof(msg), "v12: no cargo Bgft (0x%x)", (unsigned int)hb);
     avisar(msg);
     return 0;
   }
@@ -365,7 +390,7 @@ int main(void) {
                "sceBgftServiceIntDownloadRegisterTaskByStorageEx", &f_breg) ||
       resolver(hb, "sceBgftDownloadStartTask",
                "sceBgftServiceIntDownloadStartTask", &f_bstart)) {
-    avisar("v11: faltan funciones de Bgft (mira el log)");
+    avisar("v12: faltan funciones de Bgft (mira el log)");
     return 0;
   }
 
@@ -374,7 +399,7 @@ int main(void) {
   ip.size = 0x100000;
   ip.mem = malloc(ip.size);
   if (!ip.mem) {
-    avisar("v11: sin memoria para Bgft");
+    avisar("v12: sin memoria para Bgft");
     return 0;
   }
   memset(ip.mem, 0, ip.size);
@@ -395,29 +420,45 @@ int main(void) {
   anotar("servidor web (descriptor)", srv);
   anotar("servidor web (puerto)", g_puerto);
   if (srv < 0) {
-    avisar("v11: no pude abrir el servidor web interno (mira el log)");
+    avisar("v12: no pude abrir el servidor web interno (mira el log)");
     return 0;
   }
-  char url[128];
-  snprintf(url, sizeof(url), "http://127.0.0.1:%d/%s", g_puerto, NOMBRE);
+  char ipps4[64];
+  memset(ipps4, 0, sizeof(ipps4));
+  int ip_ok = obtener_ip(ipps4, sizeof(ipps4));
+  anotar("ip de la PS4 (0=ok)", ip_ok);
+  if (ip_ok == 0) {
+    anotar(ipps4, 0);
+  }
+
+  char urls[4][160];
+  memset(urls, 0, sizeof(urls));
+  if (ip_ok == 0) {
+    snprintf(urls[0], sizeof(urls[0]), "http://%s:%d/%s", ipps4, g_puerto, NOMBRE);
+  }
+  snprintf(urls[1], sizeof(urls[1]), "http://localhost:%d/%s", g_puerto, NOMBRE);
+  snprintf(urls[2], sizeof(urls[2]), "http://127.0.0.1:%d/%s", g_puerto, NOMBRE);
+  /* la variante 4 es de control: ruta del archivo, como en la v6 */
+  snprintf(urls[3], sizeof(urls[3]), "%s", ruta);
 
   const char *nombre = NOMBRE;
   int task = -1;
   int rr = -1;
   int variante;
-  /* Probamos varias formas de registrar hasta que una devuelva 0 */
-  for (variante = 1; variante <= 3; variante++) {
+  for (variante = 1; variante <= 4; variante++) {
+    const char *u = urls[variante - 1];
+    if (u[0] == 0) continue;
     bgft_download_param_ex_t dp;
     memset(&dp, 0, sizeof(dp));
-    dp.param.user_id = (variante == 3) ? -1 : 0;
+    dp.param.user_id = 0;
     dp.param.entitlement_type = 5;
     dp.param.id = "";
-    dp.param.content_url = url;
+    dp.param.content_url = u;
     dp.param.content_ex_url = "";
     dp.param.content_name = nombre;
     dp.param.icon_path = "";
     dp.param.sku_id = "";
-    dp.param.option = (variante == 2) ? 0 : 0x10000;
+    dp.param.option = 0x10000;
     dp.param.playgo_scenario_id = "0";
     dp.param.release_date = "";
     dp.param.package_type = "PS4GD";
@@ -428,12 +469,13 @@ int main(void) {
     task = -1;
     rr = ((int (*)(bgft_download_param_ex_t *, int *))f_breg)(&dp, &task);
     anotar("variante de registro", variante);
+    anotar(u, 0);
     anotar("Bgft registrar devolvio", rr);
     anotar("task id", task);
     if (rr == 0) break;
   }
   if (rr != 0) {
-    snprintf(msg, sizeof(msg), "v11: registrar fallo (0x%x) init=0x%x id=%s",
+    snprintf(msg, sizeof(msg), "v12: registrar fallo (0x%x) init=0x%x id=%s",
              (unsigned int)rr, (unsigned int)rbi, title_id);
     avisar(msg);
     close(srv);
@@ -443,13 +485,13 @@ int main(void) {
   int rst = ((int (*)(int))f_bstart)(task);
   anotar("Bgft start devolvio", rst);
 
-  snprintf(msg, sizeof(msg), "v11: id=%s tam=%ld slot=%u reg=0x%x start=0x%x",
+  snprintf(msg, sizeof(msg), "v12: id=%s tam=%ld slot=%u reg=0x%x start=0x%x",
            title_id, tam, slot, (unsigned int)rr, (unsigned int)rst);
   avisar(msg);
 
   servir(srv, ruta, tam);
   snprintf(msg, sizeof(msg),
-           "v11: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
+           "v12: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
            g_conexiones, g_servido, tam);
   avisar(msg);
   return 0;
