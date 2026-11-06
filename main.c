@@ -1,4 +1,4 @@
-/* REPO ps4-payload: instalador v10 (prueba etapa 1: instala desde un mini servidor web interno) */
+/* REPO ps4-payload: instalador v11 (prueba etapa 1: instala desde un mini servidor web interno) */
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -16,6 +16,8 @@
 #define RUTA_A "/user/data/pkg/" NOMBRE
 #define RUTA_B "/data/pkg/" NOMBRE
 #define PUERTO 9095
+#define PUERTOS_PROBAR 5
+static int g_puerto = PUERTO;
 
 typedef struct {
   char pad[45];
@@ -213,7 +215,7 @@ static void atender(int c, const char *ruta, long total) {
   fclose(f);
 }
 
-static int abrir_servidor(void) {
+static int abrir_servidor(int puerto) {
   int s = socket(AF_INET, SOCK_STREAM, 0);
   if (s < 0) {
     anotar("socket fallo errno", errno);
@@ -224,7 +226,7 @@ static int abrir_servidor(void) {
   struct sockaddr_in a;
   memset(&a, 0, sizeof(a));
   a.sin_family = AF_INET;
-  a.sin_port = htons(PUERTO);
+  a.sin_port = htons(puerto);
   a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   if (bind(s, (struct sockaddr *)&a, sizeof(a)) != 0) {
     anotar("bind fallo errno", errno);
@@ -256,7 +258,7 @@ static void servir(int s, const char *ruta, long total) {
       setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
       setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
       g_conexiones++;
-      if (g_conexiones == 1) avisar("v10: el instalador se conecto al servidor");
+      if (g_conexiones == 1) avisar("v11: el instalador se conecto al servidor");
       atender(c, ruta, total);
       close(c);
       ocioso = 0;
@@ -274,14 +276,14 @@ int main(void) {
   char msg[400];
   int res = 0;
 
-  anotar("instalador v10 (BGFT) arranco", 0);
+  anotar("instalador v11 (BGFT) arranco", 0);
 
   long ta = tamano(RUTA_A);
   long tb = tamano(RUTA_B);
   anotar("tamano /user/data/pkg", ta);
   anotar("tamano /data/pkg", tb);
   if (ta < 0 && tb < 0) {
-    avisar("v10: no existe ps4-usb-prueba.pkg en /data/pkg");
+    avisar("v11: no existe ps4-usb-prueba.pkg en /data/pkg");
     return 0;
   }
   const char *ruta = (ta >= 0) ? RUTA_A : RUTA_B;
@@ -291,7 +293,7 @@ int main(void) {
                                    0, NULL, 0, NULL, &res);
   anotar("cargar AppInstUtil", h);
   if (h < 0) {
-    snprintf(msg, sizeof(msg), "v10: no cargo AppInstUtil (0x%x)",
+    snprintf(msg, sizeof(msg), "v11: no cargo AppInstUtil (0x%x)",
              (unsigned int)h);
     avisar(msg);
     return 0;
@@ -302,14 +304,14 @@ int main(void) {
       resolver(h, "sceAppInstUtilGetTitleIdFromPkg", NULL, &f_tid) ||
       resolver(h, "sceAppInstUtilGetPrimaryAppSlot", NULL, &f_slot) ||
       resolver(h, "sceAppInstUtilAppPrepareOverwritePkg", NULL, &f_over)) {
-    avisar("v10: faltan funciones de AppInstUtil (mira el log)");
+    avisar("v11: faltan funciones de AppInstUtil (mira el log)");
     return 0;
   }
 
   int ini = ((int (*)(void))f_init)();
   anotar("initialize devolvio", ini);
   if (ini != 0) {
-    snprintf(msg, sizeof(msg), "v10: initialize fallo (0x%x)",
+    snprintf(msg, sizeof(msg), "v11: initialize fallo (0x%x)",
              (unsigned int)ini);
     avisar(msg);
     return 0;
@@ -322,7 +324,7 @@ int main(void) {
                                                          &is_app);
   anotar("GetTitleIdFromPkg devolvio", rt);
   if (rt != 0) {
-    snprintf(msg, sizeof(msg), "v10: no pudo leer el pkg (0x%x)",
+    snprintf(msg, sizeof(msg), "v11: no pudo leer el pkg (0x%x)",
              (unsigned int)rt);
     avisar(msg);
     return 0;
@@ -336,7 +338,7 @@ int main(void) {
     if ((unsigned int)rs == 0x80A3000Eu) {
       slot = 0;
     } else {
-      snprintf(msg, sizeof(msg), "v10: slot fallo (0x%x)", (unsigned int)rs);
+      snprintf(msg, sizeof(msg), "v11: slot fallo (0x%x)", (unsigned int)rs);
       avisar(msg);
       return 0;
     }
@@ -352,7 +354,7 @@ int main(void) {
                                     NULL, 0, NULL, &res);
   anotar("cargar Bgft", hb);
   if (hb < 0) {
-    snprintf(msg, sizeof(msg), "v10: no cargo Bgft (0x%x)", (unsigned int)hb);
+    snprintf(msg, sizeof(msg), "v11: no cargo Bgft (0x%x)", (unsigned int)hb);
     avisar(msg);
     return 0;
   }
@@ -363,7 +365,7 @@ int main(void) {
                "sceBgftServiceIntDownloadRegisterTaskByStorageEx", &f_breg) ||
       resolver(hb, "sceBgftDownloadStartTask",
                "sceBgftServiceIntDownloadStartTask", &f_bstart)) {
-    avisar("v10: faltan funciones de Bgft (mira el log)");
+    avisar("v11: faltan funciones de Bgft (mira el log)");
     return 0;
   }
 
@@ -372,7 +374,7 @@ int main(void) {
   ip.size = 0x100000;
   ip.mem = malloc(ip.size);
   if (!ip.mem) {
-    avisar("v10: sin memoria para Bgft");
+    avisar("v11: sin memoria para Bgft");
     return 0;
   }
   memset(ip.mem, 0, ip.size);
@@ -385,48 +387,69 @@ int main(void) {
     anotar("Bgft init fallo, sigo igual", rbi);
   }
 
-  int srv = abrir_servidor();
+  int srv = -1;
+  for (int i = 0; i < PUERTOS_PROBAR && srv < 0; i++) {
+    g_puerto = PUERTO + i;
+    srv = abrir_servidor(g_puerto);
+  }
   anotar("servidor web (descriptor)", srv);
+  anotar("servidor web (puerto)", g_puerto);
   if (srv < 0) {
-    avisar("v10: no pude abrir el servidor web interno (mira el log)");
+    avisar("v11: no pude abrir el servidor web interno (mira el log)");
     return 0;
   }
   char url[128];
-  snprintf(url, sizeof(url), "http://127.0.0.1:%d/%s", PUERTO, NOMBRE);
+  snprintf(url, sizeof(url), "http://127.0.0.1:%d/%s", g_puerto, NOMBRE);
 
   const char *nombre = NOMBRE;
-  bgft_download_param_ex_t dp;
-  memset(&dp, 0, sizeof(dp));
-  dp.param.entitlement_type = 5;
-  dp.param.id = "";
-  dp.param.content_url = url;
-  dp.param.content_name = nombre;
-  dp.param.icon_path = "";
-  dp.param.playgo_scenario_id = "0";
-  dp.param.option = 0x10000;
-  dp.slot = slot;
-
   int task = -1;
-  int rr = ((int (*)(bgft_download_param_ex_t *, int *))f_breg)(&dp, &task);
-  anotar("Bgft registrar devolvio", rr);
-  anotar("task id", task);
+  int rr = -1;
+  int variante;
+  /* Probamos varias formas de registrar hasta que una devuelva 0 */
+  for (variante = 1; variante <= 3; variante++) {
+    bgft_download_param_ex_t dp;
+    memset(&dp, 0, sizeof(dp));
+    dp.param.user_id = (variante == 3) ? -1 : 0;
+    dp.param.entitlement_type = 5;
+    dp.param.id = "";
+    dp.param.content_url = url;
+    dp.param.content_ex_url = "";
+    dp.param.content_name = nombre;
+    dp.param.icon_path = "";
+    dp.param.sku_id = "";
+    dp.param.option = (variante == 2) ? 0 : 0x10000;
+    dp.param.playgo_scenario_id = "0";
+    dp.param.release_date = "";
+    dp.param.package_type = "PS4GD";
+    dp.param.package_sub_type = "";
+    dp.param.package_size = (unsigned long)tam;
+    dp.slot = slot;
+
+    task = -1;
+    rr = ((int (*)(bgft_download_param_ex_t *, int *))f_breg)(&dp, &task);
+    anotar("variante de registro", variante);
+    anotar("Bgft registrar devolvio", rr);
+    anotar("task id", task);
+    if (rr == 0) break;
+  }
   if (rr != 0) {
-    snprintf(msg, sizeof(msg), "v10: registrar fallo (0x%x) init=0x%x id=%s",
+    snprintf(msg, sizeof(msg), "v11: registrar fallo (0x%x) init=0x%x id=%s",
              (unsigned int)rr, (unsigned int)rbi, title_id);
     avisar(msg);
+    close(srv);
     return 0;
   }
 
   int rst = ((int (*)(int))f_bstart)(task);
   anotar("Bgft start devolvio", rst);
 
-  snprintf(msg, sizeof(msg), "v10: id=%s tam=%ld slot=%u reg=0x%x start=0x%x",
+  snprintf(msg, sizeof(msg), "v11: id=%s tam=%ld slot=%u reg=0x%x start=0x%x",
            title_id, tam, slot, (unsigned int)rr, (unsigned int)rst);
   avisar(msg);
 
   servir(srv, ruta, tam);
   snprintf(msg, sizeof(msg),
-           "v10: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
+           "v11: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
            g_conexiones, g_servido, tam);
   avisar(msg);
   return 0;
