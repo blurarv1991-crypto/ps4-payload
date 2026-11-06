@@ -1,4 +1,4 @@
-/* REPO ps4-payload: instalador v12 (prueba etapa 1: instala desde un mini servidor web interno) */
+/* REPO ps4-payload: instalador v13 (prueba etapa 1: instala desde un mini servidor web interno) */
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -283,7 +283,7 @@ static void servir(int s, const char *ruta, long total) {
       setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
       setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
       g_conexiones++;
-      if (g_conexiones == 1) avisar("v12: el instalador se conecto al servidor");
+      if (g_conexiones == 1) avisar("v13: el instalador se conecto al servidor");
       atender(c, ruta, total);
       close(c);
       ocioso = 0;
@@ -297,18 +297,34 @@ static void servir(int s, const char *ruta, long total) {
   close(s);
 }
 
+
+/* Lee el content ID de la cabecera del .pkg (magic 7F 43 4E 54, ID en 0x40, 36 bytes) */
+static int leer_content_id(const char *ruta, char *out, size_t n) {
+  unsigned char h[0x64];
+  FILE *f = fopen(ruta, "rb");
+  if (!f) return -1;
+  size_t got = fread(h, 1, sizeof(h), f);
+  fclose(f);
+  if (got < sizeof(h)) return -2;
+  if (!(h[0] == 0x7F && h[1] == 0x43 && h[2] == 0x4E && h[3] == 0x54)) return -3;
+  if (n < 37) return -4;
+  memcpy(out, h + 0x40, 36);
+  out[36] = 0;
+  return 0;
+}
+
 int main(void) {
   char msg[400];
   int res = 0;
 
-  anotar("instalador v12 (BGFT) arranco", 0);
+  anotar("instalador v13 (BGFT) arranco", 0);
 
   long ta = tamano(RUTA_A);
   long tb = tamano(RUTA_B);
   anotar("tamano /user/data/pkg", ta);
   anotar("tamano /data/pkg", tb);
   if (ta < 0 && tb < 0) {
-    avisar("v12: no existe ps4-usb-prueba.pkg en /data/pkg");
+    avisar("v13: no existe ps4-usb-prueba.pkg en /data/pkg");
     return 0;
   }
   const char *ruta = (ta >= 0) ? RUTA_A : RUTA_B;
@@ -318,7 +334,7 @@ int main(void) {
                                    0, NULL, 0, NULL, &res);
   anotar("cargar AppInstUtil", h);
   if (h < 0) {
-    snprintf(msg, sizeof(msg), "v12: no cargo AppInstUtil (0x%x)",
+    snprintf(msg, sizeof(msg), "v13: no cargo AppInstUtil (0x%x)",
              (unsigned int)h);
     avisar(msg);
     return 0;
@@ -329,14 +345,14 @@ int main(void) {
       resolver(h, "sceAppInstUtilGetTitleIdFromPkg", NULL, &f_tid) ||
       resolver(h, "sceAppInstUtilGetPrimaryAppSlot", NULL, &f_slot) ||
       resolver(h, "sceAppInstUtilAppPrepareOverwritePkg", NULL, &f_over)) {
-    avisar("v12: faltan funciones de AppInstUtil (mira el log)");
+    avisar("v13: faltan funciones de AppInstUtil (mira el log)");
     return 0;
   }
 
   int ini = ((int (*)(void))f_init)();
   anotar("initialize devolvio", ini);
   if (ini != 0) {
-    snprintf(msg, sizeof(msg), "v12: initialize fallo (0x%x)",
+    snprintf(msg, sizeof(msg), "v13: initialize fallo (0x%x)",
              (unsigned int)ini);
     avisar(msg);
     return 0;
@@ -349,7 +365,7 @@ int main(void) {
                                                          &is_app);
   anotar("GetTitleIdFromPkg devolvio", rt);
   if (rt != 0) {
-    snprintf(msg, sizeof(msg), "v12: no pudo leer el pkg (0x%x)",
+    snprintf(msg, sizeof(msg), "v13: no pudo leer el pkg (0x%x)",
              (unsigned int)rt);
     avisar(msg);
     return 0;
@@ -363,7 +379,7 @@ int main(void) {
     if ((unsigned int)rs == 0x80A3000Eu) {
       slot = 0;
     } else {
-      snprintf(msg, sizeof(msg), "v12: slot fallo (0x%x)", (unsigned int)rs);
+      snprintf(msg, sizeof(msg), "v13: slot fallo (0x%x)", (unsigned int)rs);
       avisar(msg);
       return 0;
     }
@@ -379,7 +395,7 @@ int main(void) {
                                     NULL, 0, NULL, &res);
   anotar("cargar Bgft", hb);
   if (hb < 0) {
-    snprintf(msg, sizeof(msg), "v12: no cargo Bgft (0x%x)", (unsigned int)hb);
+    snprintf(msg, sizeof(msg), "v13: no cargo Bgft (0x%x)", (unsigned int)hb);
     avisar(msg);
     return 0;
   }
@@ -390,7 +406,7 @@ int main(void) {
                "sceBgftServiceIntDownloadRegisterTaskByStorageEx", &f_breg) ||
       resolver(hb, "sceBgftDownloadStartTask",
                "sceBgftServiceIntDownloadStartTask", &f_bstart)) {
-    avisar("v12: faltan funciones de Bgft (mira el log)");
+    avisar("v13: faltan funciones de Bgft (mira el log)");
     return 0;
   }
 
@@ -399,7 +415,7 @@ int main(void) {
   ip.size = 0x100000;
   ip.mem = malloc(ip.size);
   if (!ip.mem) {
-    avisar("v12: sin memoria para Bgft");
+    avisar("v13: sin memoria para Bgft");
     return 0;
   }
   memset(ip.mem, 0, ip.size);
@@ -420,9 +436,17 @@ int main(void) {
   anotar("servidor web (descriptor)", srv);
   anotar("servidor web (puerto)", g_puerto);
   if (srv < 0) {
-    avisar("v12: no pude abrir el servidor web interno (mira el log)");
+    avisar("v13: no pude abrir el servidor web interno (mira el log)");
     return 0;
   }
+  char cid[48];
+  memset(cid, 0, sizeof(cid));
+  int cid_ok = leer_content_id(ruta, cid, sizeof(cid));
+  anotar("content id (0=ok)", cid_ok);
+  if (cid_ok == 0) {
+    anotar(cid, 0);
+  }
+
   char ipps4[64];
   memset(ipps4, 0, sizeof(ipps4));
   int ip_ok = obtener_ip(ipps4, sizeof(ipps4));
@@ -452,7 +476,7 @@ int main(void) {
     memset(&dp, 0, sizeof(dp));
     dp.param.user_id = 0;
     dp.param.entitlement_type = 5;
-    dp.param.id = "";
+    dp.param.id = (variante <= 3 && cid_ok == 0) ? cid : "";
     dp.param.content_url = u;
     dp.param.content_ex_url = "";
     dp.param.content_name = nombre;
@@ -475,7 +499,7 @@ int main(void) {
     if (rr == 0) break;
   }
   if (rr != 0) {
-    snprintf(msg, sizeof(msg), "v12: registrar fallo (0x%x) init=0x%x id=%s",
+    snprintf(msg, sizeof(msg), "v13: registrar fallo (0x%x) init=0x%x id=%s",
              (unsigned int)rr, (unsigned int)rbi, title_id);
     avisar(msg);
     close(srv);
@@ -485,13 +509,13 @@ int main(void) {
   int rst = ((int (*)(int))f_bstart)(task);
   anotar("Bgft start devolvio", rst);
 
-  snprintf(msg, sizeof(msg), "v12: id=%s tam=%ld slot=%u reg=0x%x start=0x%x",
+  snprintf(msg, sizeof(msg), "v13: id=%s tam=%ld slot=%u reg=0x%x start=0x%x",
            title_id, tam, slot, (unsigned int)rr, (unsigned int)rst);
   avisar(msg);
 
   servir(srv, ruta, tam);
   snprintf(msg, sizeof(msg),
-           "v12: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
+           "v13: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
            g_conexiones, g_servido, tam);
   avisar(msg);
   return 0;
