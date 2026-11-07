@@ -1,5 +1,6 @@
-/* REPO ps4-payload: v16 (prueba: pide la instalacion a Remote Package Installer, puerto 12800, con un mini servidor local) */
+/* REPO ps4-payload: v17 (prueba: pide la instalacion a Remote Package Installer, puerto 12800, con un mini servidor local) */
 #include <stdio.h>
+#include <signal.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -114,8 +115,15 @@ static int g_conexiones = 0;
 static int mandar(int c, const char *d, long n) {
   long hecho = 0;
   while (hecho < n) {
+#ifdef MSG_NOSIGNAL
+    long r = send(c, d + hecho, (size_t)(n - hecho), MSG_NOSIGNAL);
+#else
     long r = send(c, d + hecho, (size_t)(n - hecho), 0);
-    if (r <= 0) return -1;
+#endif
+    if (r <= 0) {
+      anotar("send fallo errno", errno);
+      return -1;
+    }
     hecho += r;
   }
   return 0;
@@ -213,6 +221,7 @@ static void atender(int c, const char *ruta, long total) {
     g_servido += (long)got;
   }
   fclose(f);
+  anotar("enviado en este pedido", largo - falta);
 }
 
 
@@ -283,7 +292,7 @@ static void servir(int s, const char *ruta, long total) {
       setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
       setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
       g_conexiones++;
-      if (g_conexiones == 1) avisar("v16: el instalador se conecto al servidor");
+      if (g_conexiones == 1) avisar("v17: el instalador se conecto al servidor");
       atender(c, ruta, total);
       close(c);
       ocioso = 0;
@@ -315,7 +324,7 @@ static int esperar_conexion(int s, const char *ruta, long total, int ms) {
       setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
       setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
       g_conexiones++;
-      if (g_conexiones == 1) avisar("v16: el instalador se conecto al servidor");
+      if (g_conexiones == 1) avisar("v17: el instalador se conecto al servidor");
       atender(c, ruta, total);
       close(c);
       return 1;
@@ -380,14 +389,15 @@ static int pedir_instalacion(const char *url_pkg, char *resp, size_t n) {
 int main(void) {
   char msg[400];
 
-  anotar("v16 arranco", 0);
+  signal(SIGPIPE, SIG_IGN);
+  anotar("v17 arranco", 0);
 
   long ta = tamano(RUTA_A);
   long tb = tamano(RUTA_B);
   anotar("tamano /user/data/pkg", ta);
   anotar("tamano /data/pkg", tb);
   if (ta < 0 && tb < 0) {
-    avisar("v16: no existe ps4-usb-prueba.pkg en /data/pkg");
+    avisar("v17: no existe ps4-usb-prueba.pkg en /data/pkg");
     return 0;
   }
   const char *ruta = (ta >= 0) ? RUTA_A : RUTA_B;
@@ -401,7 +411,7 @@ int main(void) {
   anotar("servidor web (descriptor)", srv);
   anotar("servidor web (puerto)", g_puerto);
   if (srv < 0) {
-    avisar("v16: no pude abrir el servidor web interno (mira el log)");
+    avisar("v17: no pude abrir el servidor web interno (mira el log)");
     return 0;
   }
 
@@ -424,28 +434,36 @@ int main(void) {
     if (urls[i][0] == 0) continue;
     anotar("pidiendo a Remote Package Installer", i + 1);
     anotar(urls[i], 0);
-    int n = pedir_instalacion(urls[i], resp, sizeof(resp));
+    int n = -1;
+    for (int k = 1; k <= 3; k++) {
+      n = pedir_instalacion(urls[i], resp, sizeof(resp));
+      if (n >= 0) break;
+      anotar("reintento de conexion con RPI", k);
+      sleep(3);
+    }
     anotar("respuesta de RPI (bytes)", n);
     if (n > 0) anotar(resp, 0);
     if (n < 0) {
-      avisar("v16: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
+      avisar("v17: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
       close(srv);
       return 0;
     }
-    snprintf(msg, sizeof(msg), "v16: RPI respondio %d bytes (intento %d)", n, i + 1);
+    snprintf(msg, sizeof(msg), "v17: RPI respondio %d bytes (intento %d)", n, i + 1);
     avisar(msg);
     conectado = esperar_conexion(srv, ruta, tam, 12000);
     anotar("conexion recibida (0=no)", conectado);
   }
   if (!conectado) {
-    avisar("v16: nadie se conecto al servidor (mira el log)");
+    avisar("v17: nadie se conecto al servidor (mira el log)");
     close(srv);
     return 0;
   }
 
   servir(srv, ruta, tam);
+  anotar("servidor termino, conexiones", g_conexiones);
+  anotar("servidor termino, enviado total", g_servido);
   snprintf(msg, sizeof(msg),
-           "v16: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
+           "v17: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
            g_conexiones, g_servido, tam);
   avisar(msg);
   return 0;
