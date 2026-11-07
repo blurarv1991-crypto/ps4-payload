@@ -1,4 +1,4 @@
-/* REPO ps4-payload: v19 (instala desde el celular por USB: servidor local que lee el .pkg por MTP + Remote Package Installer) */
+/* REPO ps4-payload: v20 (instala desde el celular por USB: servidor local que lee el .pkg por MTP + Remote Package Installer) */
 #include <stdio.h>
 #include <signal.h>
 #include <string.h>
@@ -58,10 +58,19 @@ int sceKernelLoadStartModule(const char *path, size_t argc, const void *argv,
                              unsigned int flags, const void *opt, int *res);
 int sceKernelDlsym(int handle, const char *symbol, void **addr);
 
+static long g_t0 = 0;
+static long ms_ahora(void) {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return tv.tv_sec * 1000L + tv.tv_usec / 1000L;
+}
+
 static void anotar(const char *txt, long valor) {
   FILE *f = fopen("/data/ps4-payload.log", "a");
   if (f) {
-    fprintf(f, "%s %ld\n", txt, valor);
+    if (g_t0 == 0) g_t0 = ms_ahora();
+    long t = ms_ahora() - g_t0;
+    fprintf(f, "[%ld.%03ld] %s %ld\n", t / 1000, t % 1000, txt, valor);
     fclose(f);
   }
 }
@@ -406,8 +415,31 @@ static void atender(int c, const char *ruta, long total) {
     req[n] = 0;
     if (strstr(req, "\r\n\r\n")) break;
   }
-  if (n <= 0) return;
+  if (n <= 0) {
+    anotar("conexion sin pedido, bytes", n);
+    return;
+  }
   req[n] = 0;
+  {
+    char linea[140];
+    int k = 0;
+    while (k < 130 && req[k] && req[k] != '\r' && req[k] != '\n') {
+      linea[k] = req[k];
+      k++;
+    }
+    linea[k] = 0;
+    anotar(linea, 0);
+    const char *rr = buscar_ci(req, "range:");
+    if (rr) {
+      k = 0;
+      while (k < 130 && rr[k] && rr[k] != '\r' && rr[k] != '\n') {
+        linea[k] = rr[k];
+        k++;
+      }
+      linea[k] = 0;
+      anotar(linea, 0);
+    }
+  }
 
   int es_head = (strncmp(req, "HEAD", 4) == 0);
   long ini = 0, fin = total - 1;
@@ -531,7 +563,8 @@ static void servir(int s, const char *ruta, long total) {
       setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
       setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
       g_conexiones++;
-      if (g_conexiones == 1) avisar("v19: el instalador se conecto al servidor");
+      anotar("conexion aceptada, numero", g_conexiones);
+      if (g_conexiones == 1) avisar("v20: el instalador se conecto al servidor");
       atender(c, ruta, total);
       close(c);
       ocioso = 0;
@@ -563,7 +596,8 @@ static int esperar_conexion(int s, const char *ruta, long total, int ms) {
       setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
       setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
       g_conexiones++;
-      if (g_conexiones == 1) avisar("v19: el instalador se conecto al servidor");
+      anotar("conexion aceptada, numero", g_conexiones);
+      if (g_conexiones == 1) avisar("v20: el instalador se conecto al servidor");
       atender(c, ruta, total);
       close(c);
       return 1;
@@ -628,14 +662,14 @@ static int pedir_instalacion(const char *url_pkg, char *resp, size_t n) {
 int main(void) {
   char msg[400];
   signal(SIGPIPE, SIG_IGN);
-  anotar("v19 arranco", 0);
-  avisar("v19: instalando desde el celular por USB...");
+  anotar("v20 arranco", 0);
+  avisar("v20: instalando desde el celular por USB...");
 
   int res = 0;
   int hu = sceKernelLoadStartModule("/system/common/lib/libSceUsbd.sprx", 0, NULL, 0, NULL, &res);
   anotar("cargar libSceUsbd", hu);
   if (hu < 0) {
-    avisar("v19: no pude cargar libSceUsbd (mira el log)");
+    avisar("v20: no pude cargar libSceUsbd (mira el log)");
     return 0;
   }
   void *fn[8];
@@ -644,7 +678,7 @@ int main(void) {
                             "sceUsbdReleaseInterface", "sceUsbdClose"};
   for (int i = 0; i < 8; i++) {
     if (resolver(hu, nombres[i], NULL, &fn[i]) != 0) {
-      avisar("v19: faltan funciones de USB (mira el log)");
+      avisar("v20: faltan funciones de USB (mira el log)");
       return 0;
     }
   }
@@ -674,20 +708,20 @@ int main(void) {
     }
   }
   if (!cel) {
-    avisar("v19: no encontre el celular (cable y modo Transferencia de archivos)");
+    avisar("v20: no encontre el celular (cable y modo Transferencia de archivos)");
     return 0;
   }
   void *h = NULL;
   r = p_abrir(cel, &h);
   anotar("abrir celular", r);
   if (r != 0 || !h) {
-    avisar("v19: no pude abrir el celular por USB (mira el log)");
+    avisar("v20: no pude abrir el celular por USB (mira el log)");
     return 0;
   }
   r = p_reclamar(h, 0);
   anotar("reclamar interfaz 0", r);
   if (r != 0) {
-    avisar("v19: no pude reclamar la interfaz USB del celular (mira el log)");
+    avisar("v20: no pude reclamar la interfaz USB del celular (mira el log)");
     p_cerrar(h);
     return 0;
   }
@@ -711,7 +745,7 @@ int main(void) {
     }
   }
   if (!dl) {
-    avisar("v19: no encontre la carpeta Download en el celular");
+    avisar("v20: no encontre la carpeta Download en el celular");
     cerrar_usb();
     return 0;
   }
@@ -736,7 +770,7 @@ int main(void) {
     }
   }
   if (!cand) {
-    avisar("v19: no hay un .pkg grande en la carpeta Download del celular");
+    avisar("v20: no hay un .pkg grande en la carpeta Download del celular");
     cerrar_usb();
     return 0;
   }
@@ -752,7 +786,7 @@ int main(void) {
   anotar("servidor web (descriptor)", srv);
   anotar("servidor web (puerto)", g_puerto);
   if (srv < 0) {
-    avisar("v19: no pude abrir el servidor web interno (mira el log)");
+    avisar("v20: no pude abrir el servidor web interno (mira el log)");
     cerrar_usb();
     return 0;
   }
@@ -786,18 +820,18 @@ int main(void) {
     anotar("respuesta de RPI (bytes)", nr);
     if (nr > 0) anotar(resp, 0);
     if (nr < 0) {
-      avisar("v19: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
+      avisar("v20: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
       close(srv);
       cerrar_usb();
       return 0;
     }
-    snprintf(msg, sizeof(msg), "v19: RPI respondio %d bytes (intento %d)", nr, i + 1);
+    snprintf(msg, sizeof(msg), "v20: RPI respondio %d bytes (intento %d)", nr, i + 1);
     avisar(msg);
     conectado = esperar_conexion(srv, "", tam, 12000);
     anotar("conexion recibida (0=no)", conectado);
   }
   if (!conectado) {
-    avisar("v19: nadie se conecto al servidor (mira el log)");
+    avisar("v20: nadie se conecto al servidor (mira el log)");
     close(srv);
     cerrar_usb();
     return 0;
@@ -808,7 +842,7 @@ int main(void) {
   anotar("servidor termino, enviado total", g_servido);
   cerrar_usb();
   snprintf(msg, sizeof(msg),
-           "v19: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
+           "v20: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
            g_conexiones, g_servido, tam);
   avisar(msg);
   return 0;
