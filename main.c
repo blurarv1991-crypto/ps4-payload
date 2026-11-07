@@ -1,4 +1,4 @@
-/* REPO ps4-payload: v20 (instala desde el celular por USB: servidor local que lee el .pkg por MTP + Remote Package Installer) */
+/* REPO ps4-payload: v21 (instala desde el celular por USB; servidor local que atiende varias conexiones a la vez + Remote Package Installer) */
 #include <stdio.h>
 #include <signal.h>
 #include <string.h>
@@ -303,9 +303,6 @@ static int mtp_rango(void *h, uint32_t handle, uint64_t off, uint32_t len,
   return 0;
 }
 
-/* ---------- Mini servidor web (solo para la prueba de la etapa 1) ----------
-   Sirve el .pkg por http://127.0.0.1:PUERTO con soporte de Range.
-   Atiende una conexion a la vez; cada respuesta cierra la conexion. */
 
 static long g_servido = 0;
 static int g_conexiones = 0;
@@ -341,158 +338,6 @@ static const char *buscar_ci(const char *txt, const char *clave) {
     if (i == lc) return p;
   }
   return NULL;
-}
-
-
-static void *g_h = NULL;      /* celular abierto por USB */
-static uint32_t g_obj = 0;    /* objeto MTP del .pkg elegido */
-#define PARTE_USB 2097152u    /* pedimos al celular de 2 MB en 2 MB */
-
-/* Manda al cliente el rango [ini, ini+largo) del archivo, leyendolo del celular.
-   Si el cliente corta, sigue leyendo (y tirando) lo que quede de ese trozo para no
-   desordenar el USB. Devuelve 0 si todo bien, 1 si el cliente corto, -1 si fallo el USB. */
-static int servir_rango_usb(int c, uint64_t ini, uint64_t largo) {
-  uint64_t hecho = 0;
-  int cliente_ok = 1;
-  while (hecho < largo) {
-    uint64_t resto = largo - hecho;
-    uint32_t pedir = resto > PARTE_USB ? PARTE_USB : (uint32_t)resto;
-    uint64_t pos = ini + hecho;
-    if (mtp_enviar(g_h, 0x95C1, 4, g_obj, (uint32_t)(pos & 0xFFFFFFFFULL),
-                   (uint32_t)(pos >> 32), pedir) != 0) {
-      return -1;
-    }
-    int got = 0;
-    int r = mtp_leer(g_h, chunk, CH, &got);
-    if (r != 0 || got < 12 || rd16(chunk + 4) != 2) {
-      anotar("USB: fallo al leer, r", r);
-      anotar("USB: codigo", got >= 8 ? rd16(chunk + 6) : 0);
-      return -1;
-    }
-    uint32_t falta = rd32(chunk) - 12;
-    uint32_t parte = (uint32_t)(got - 12);
-    if (cliente_ok && parte > 0) {
-      if (mandar(c, (const char *)(chunk + 12), (long)parte) != 0) cliente_ok = 0;
-      else g_servido += (long)parte;
-    }
-    while (parte < falta) {
-      got = 0;
-      r = mtp_leer(g_h, chunk, CH, &got);
-      if (r != 0 || got <= 0) {
-        anotar("USB: lectura cortada, r", r);
-        return -1;
-      }
-      if (cliente_ok) {
-        if (mandar(c, (const char *)chunk, (long)got) != 0) cliente_ok = 0;
-        else g_servido += (long)got;
-      }
-      parte += (uint32_t)got;
-    }
-    mtp_respuesta(g_h);
-    if (parte == 0) return -1;
-    hecho += parte;
-    if (!cliente_ok) return 1;
-  }
-  return 0;
-}
-
-static void cerrar_usb(void) {
-  if (!g_h) return;
-  mtp_enviar(g_h, 0x1003, 0, 0, 0, 0, 0);
-  mtp_respuesta(g_h);
-  p_soltar(g_h, 0);
-  p_cerrar(g_h);
-  g_h = NULL;
-}
-
-static void atender(int c, const char *ruta, long total) {
-  char req[2048];
-  int n = 0;
-  while (n < (int)sizeof(req) - 1) {
-    int r = (int)recv(c, req + n, sizeof(req) - 1 - n, 0);
-    if (r <= 0) break;
-    n += r;
-    req[n] = 0;
-    if (strstr(req, "\r\n\r\n")) break;
-  }
-  if (n <= 0) {
-    anotar("conexion sin pedido, bytes", n);
-    return;
-  }
-  req[n] = 0;
-  {
-    char linea[140];
-    int k = 0;
-    while (k < 130 && req[k] && req[k] != '\r' && req[k] != '\n') {
-      linea[k] = req[k];
-      k++;
-    }
-    linea[k] = 0;
-    anotar(linea, 0);
-    const char *rr = buscar_ci(req, "range:");
-    if (rr) {
-      k = 0;
-      while (k < 130 && rr[k] && rr[k] != '\r' && rr[k] != '\n') {
-        linea[k] = rr[k];
-        k++;
-      }
-      linea[k] = 0;
-      anotar(linea, 0);
-    }
-  }
-
-  int es_head = (strncmp(req, "HEAD", 4) == 0);
-  long ini = 0, fin = total - 1;
-  int parcial = 0;
-  const char *rg = buscar_ci(req, "range: bytes=");
-  if (rg) {
-    rg += 13;
-    if (*rg >= '0' && *rg <= '9') {
-      char *fp = NULL;
-      ini = strtol(rg, &fp, 10);
-      if (fp && *fp == '-') {
-        fp++;
-        if (*fp >= '0' && *fp <= '9') fin = strtol(fp, NULL, 10);
-      }
-      if (fin > total - 1) fin = total - 1;
-      if (ini < 0 || ini > fin) {
-        ini = 0;
-        fin = total - 1;
-      } else {
-        parcial = 1;
-      }
-    }
-  }
-  long largo = fin - ini + 1;
-
-  char cab[400];
-  int lc;
-  if (parcial) {
-    lc = snprintf(cab, sizeof(cab),
-                  "HTTP/1.1 206 Partial Content\r\n"
-                  "Content-Type: application/octet-stream\r\n"
-                  "Accept-Ranges: bytes\r\n"
-                  "Content-Range: bytes %ld-%ld/%ld\r\n"
-                  "Content-Length: %ld\r\n"
-                  "Connection: close\r\n\r\n",
-                  ini, fin, total, largo);
-  } else {
-    lc = snprintf(cab, sizeof(cab),
-                  "HTTP/1.1 200 OK\r\n"
-                  "Content-Type: application/octet-stream\r\n"
-                  "Accept-Ranges: bytes\r\n"
-                  "Content-Length: %ld\r\n"
-                  "Connection: close\r\n\r\n",
-                  largo);
-  }
-  anotar(es_head ? "pedido HEAD, ini" : "pedido GET, ini", ini);
-  anotar("pedido fin", fin);
-  if (mandar(c, cab, lc) != 0) return;
-  if (es_head) return;
-
-  long antes = g_servido;
-  servir_rango_usb(c, (uint64_t)ini, (uint64_t)largo);
-  anotar("enviado en este pedido", g_servido - antes);
 }
 
 
@@ -548,79 +393,317 @@ static int abrir_servidor(int puerto) {
   return s;
 }
 
-static void servir(int s, const char *ruta, long total) {
-  long ocioso = 0; /* milisegundos sin actividad */
-  while (1) {
-    struct sockaddr_in ca;
-    socklen_t cl = sizeof(ca);
-    int c = accept(s, (struct sockaddr *)&ca, &cl);
-    if (c >= 0) {
-      int fl = fcntl(c, F_GETFL, 0);
-      fcntl(c, F_SETFL, fl & ~O_NONBLOCK);
-      struct timeval tv;
-      tv.tv_sec = 15;
-      tv.tv_usec = 0;
-      setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-      setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-      g_conexiones++;
-      anotar("conexion aceptada, numero", g_conexiones);
-      if (g_conexiones == 1) avisar("v20: el instalador se conecto al servidor");
-      atender(c, ruta, total);
-      close(c);
-      ocioso = 0;
-    } else {
-      usleep(20000);
-      ocioso += 20;
-    }
-    if (g_conexiones == 0 && ocioso > 40000) break;
-    if (g_conexiones > 0 && ocioso > 180000) break;
-  }
-  close(s);
+
+/* ---------- Servidor que atiende varias conexiones a la vez ----------
+   Un solo hilo, todo sin bloqueos: si la PS4 abre una conexion y no lee,
+   las demas siguen avanzando. El celular se lee de 1 MB en 1 MB. */
+
+static void *g_h = NULL;      /* celular abierto por USB */
+static uint32_t g_obj = 0;    /* objeto MTP del .pkg elegido */
+static long g_tam = 0;        /* tamano del .pkg */
+#define PARTE_USB 1048576u
+#define MAXC 8
+
+static void cerrar_usb(void) {
+  if (!g_h) return;
+  mtp_enviar(g_h, 0x1003, 0, 0, 0, 0, 0);
+  mtp_respuesta(g_h);
+  p_soltar(g_h, 0);
+  p_cerrar(g_h);
+  g_h = NULL;
 }
 
-
-
-/* Espera hasta 'ms' milisegundos a que alguien se conecte; si llega, la atiende */
-static int esperar_conexion(int s, const char *ruta, long total, int ms) {
-  long t = 0;
-  while (t < ms) {
-    struct sockaddr_in ca;
-    socklen_t cl = sizeof(ca);
-    int c = accept(s, (struct sockaddr *)&ca, &cl);
-    if (c >= 0) {
-      int fl = fcntl(c, F_GETFL, 0);
-      fcntl(c, F_SETFL, fl & ~O_NONBLOCK);
-      struct timeval tv;
-      tv.tv_sec = 15;
-      tv.tv_usec = 0;
-      setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-      setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-      g_conexiones++;
-      anotar("conexion aceptada, numero", g_conexiones);
-      if (g_conexiones == 1) avisar("v20: el instalador se conecto al servidor");
-      atender(c, ruta, total);
-      close(c);
-      return 1;
+/* Trae 'len' bytes del archivo desde 'off' leyendolos del celular. 0 = bien */
+static int mtp_traer(uint8_t *dest, uint64_t off, uint32_t len) {
+  if (mtp_enviar(g_h, 0x95C1, 4, g_obj, (uint32_t)(off & 0xFFFFFFFFULL),
+                 (uint32_t)(off >> 32), len) != 0) {
+    return -1;
+  }
+  int got = 0;
+  int r = mtp_leer(g_h, chunk, CH, &got);
+  if (r != 0 || got < 12 || rd16(chunk + 4) != 2) {
+    anotar("USB: fallo al leer, r", r);
+    anotar("USB: codigo", got >= 8 ? rd16(chunk + 6) : 0);
+    return -1;
+  }
+  uint32_t falta = rd32(chunk) - 12;
+  uint32_t parte = (uint32_t)(got - 12);
+  if (parte > len) parte = len;
+  memcpy(dest, chunk + 12, parte);
+  uint32_t recibido = (uint32_t)(got - 12);
+  while (recibido < falta) {
+    got = 0;
+    r = mtp_leer(g_h, chunk, CH, &got);
+    if (r != 0 || got <= 0) {
+      anotar("USB: lectura cortada, r", r);
+      return -1;
     }
-    usleep(20000);
-    t += 20;
+    if (parte < len) {
+      uint32_t cp = (uint32_t)got;
+      if (parte + cp > len) cp = len - parte;
+      memcpy(dest + parte, chunk, cp);
+      parte += cp;
+    }
+    recibido += (uint32_t)got;
+  }
+  mtp_respuesta(g_h);
+  if (parte != len) {
+    anotar("USB: llegaron menos bytes de los pedidos", (long)parte);
+    return -1;
   }
   return 0;
 }
 
-/* Manda POST /api/install a Remote Package Installer (127.0.0.1:12800).
-   Devuelve los bytes de respuesta (en resp) o -1 si no pudo conectar. */
-static int pedir_instalacion(const char *url_pkg, char *resp, size_t n) {
-  resp[0] = 0;
+typedef struct {
+  int fd;                /* -1 = libre */
+  int num;               /* numero de conexion (para el log) */
+  int estado;            /* 1 leyendo pedido, 2 enviando cabecera, 3 enviando datos */
+  char req[2048];
+  int nreq;
+  char cab[400];
+  int lcab;
+  int cab_env;
+  int es_head;
+  uint64_t pos;          /* proximo byte del archivo por traer del celular */
+  uint64_t falta;        /* bytes del archivo que aun no se traen */
+  uint8_t *buf;          /* datos ya traidos del celular */
+  uint32_t blen;
+  uint32_t benv;
+  long total_env;        /* bytes enviados en este pedido */
+  long ultimo;           /* ultima vez que hubo avance */
+} conn_t;
+
+static conn_t cs[MAXC];
+static int g_rpi = -1;
+static char g_rpi_resp[1500];
+static int g_rpi_n = 0;
+
+static void poner_no_bloq(int fd) {
+  int fl = fcntl(fd, F_GETFL, 0);
+  fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+}
+
+static void conn_cerrar(conn_t *c, const char *motivo) {
+  if (c->fd < 0) return;
+  anotar(motivo, c->num);
+  anotar("enviado en este pedido", c->total_env);
+  close(c->fd);
+  c->fd = -1;
+}
+
+static void conn_nueva(int fd, long ahora) {
+  int i;
+  for (i = 0; i < MAXC; i++) {
+    if (cs[i].fd < 0) break;
+  }
+  if (i == MAXC) {
+    anotar("demasiadas conexiones, cierro una", 0);
+    close(fd);
+    return;
+  }
+  conn_t *c = &cs[i];
+  uint8_t *b = c->buf;
+  memset(c, 0, sizeof(*c));
+  c->buf = b;
+  c->fd = fd;
+  c->estado = 1;
+  c->ultimo = ahora;
+  c->num = ++g_conexiones;
+  poner_no_bloq(fd);
+  anotar("conexion aceptada, numero", c->num);
+  if (c->num == 1) avisar("v21: el instalador se conecto al servidor");
+}
+
+/* Lee el pedido ya recibido y prepara la cabecera. 0 = bien */
+static int conn_preparar(conn_t *c) {
+  char *req = c->req;
+  char linea[140];
+  int k = 0;
+  while (k < 130 && req[k] && req[k] != '\r' && req[k] != '\n') {
+    linea[k] = req[k];
+    k++;
+  }
+  linea[k] = 0;
+  anotar(linea, c->num);
+  c->es_head = (strncmp(req, "HEAD", 4) == 0);
+  long total = g_tam;
+  long ini = 0, fin = total - 1;
+  int parcial = 0;
+  const char *rg = buscar_ci(req, "range: bytes=");
+  if (rg) {
+    k = 0;
+    while (k < 130 && rg[k] && rg[k] != '\r' && rg[k] != '\n') {
+      linea[k] = rg[k];
+      k++;
+    }
+    linea[k] = 0;
+    anotar(linea, c->num);
+    rg += 13;
+    if (*rg >= '0' && *rg <= '9') {
+      char *fp = NULL;
+      ini = strtol(rg, &fp, 10);
+      if (fp && *fp == '-') {
+        fp++;
+        if (*fp >= '0' && *fp <= '9') fin = strtol(fp, NULL, 10);
+      }
+      if (fin > total - 1) fin = total - 1;
+      if (ini < 0 || ini > fin) {
+        ini = 0;
+        fin = total - 1;
+      } else {
+        parcial = 1;
+      }
+    }
+  }
+  long largo = fin - ini + 1;
+  if (parcial) {
+    c->lcab = snprintf(c->cab, sizeof(c->cab),
+                       "HTTP/1.1 206 Partial Content\r\n"
+                       "Content-Type: application/octet-stream\r\n"
+                       "Accept-Ranges: bytes\r\n"
+                       "Content-Range: bytes %ld-%ld/%ld\r\n"
+                       "Content-Length: %ld\r\n"
+                       "Connection: close\r\n\r\n",
+                       ini, fin, total, largo);
+  } else {
+    c->lcab = snprintf(c->cab, sizeof(c->cab),
+                       "HTTP/1.1 200 OK\r\n"
+                       "Content-Type: application/octet-stream\r\n"
+                       "Accept-Ranges: bytes\r\n"
+                       "Content-Length: %ld\r\n"
+                       "Connection: close\r\n\r\n",
+                       largo);
+  }
+  anotar(c->es_head ? "pedido HEAD, ini" : "pedido GET, ini", ini);
+  anotar("pedido fin", fin);
+  c->pos = (uint64_t)ini;
+  c->falta = (uint64_t)largo;
+  c->cab_env = 0;
+  c->estado = 2;
+  return 0;
+}
+
+/* Envia sin bloquear: devuelve los bytes enviados (0 si no cabe ahora) o -1 si fallo */
+static long enviar_nb(int fd, const uint8_t *d, long n) {
+#ifdef MSG_NOSIGNAL
+  long r = send(fd, d, (size_t)n, MSG_NOSIGNAL);
+#else
+  long r = send(fd, d, (size_t)n, 0);
+#endif
+  if (r >= 0) return r;
+  if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+  anotar("send fallo errno", errno);
+  return -1;
+}
+
+/* Avanza una conexion un paso. Devuelve 1 si hubo avance. */
+static int conn_procesar(conn_t *c, long ahora) {
+  int prog = 0;
+  if (c->fd < 0) return 0;
+
+  if (c->estado == 1) {
+    int r = (int)recv(c->fd, c->req + c->nreq, sizeof(c->req) - 1 - (size_t)c->nreq, 0);
+    if (r > 0) {
+      c->nreq += r;
+      c->req[c->nreq] = 0;
+      prog = 1;
+      c->ultimo = ahora;
+      if (strstr(c->req, "\r\n\r\n")) {
+        conn_preparar(c);
+      } else if (c->nreq >= (int)sizeof(c->req) - 1) {
+        conn_cerrar(c, "pedido demasiado largo, numero");
+        return 1;
+      }
+    } else if (r == 0) {
+      conn_cerrar(c, "conexion cerrada sin pedido, numero");
+      return 1;
+    } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+      anotar("recv fallo errno", errno);
+      conn_cerrar(c, "conexion con error al leer, numero");
+      return 1;
+    }
+  }
+
+  if (c->fd >= 0 && c->estado == 2) {
+    long r = enviar_nb(c->fd, (const uint8_t *)c->cab + c->cab_env, c->lcab - c->cab_env);
+    if (r < 0) {
+      conn_cerrar(c, "cliente cerro, numero");
+      return 1;
+    }
+    if (r > 0) {
+      c->cab_env += (int)r;
+      c->ultimo = ahora;
+      prog = 1;
+      if (c->cab_env >= c->lcab) {
+        if (c->es_head) {
+          conn_cerrar(c, "HEAD atendido, numero");
+          return 1;
+        }
+        c->estado = 3;
+      }
+    }
+  }
+
+  if (c->fd >= 0 && c->estado == 3) {
+    if (c->benv >= c->blen) {
+      if (c->falta == 0) {
+        conn_cerrar(c, "pedido completo, numero");
+        return 1;
+      }
+      uint32_t pedir = c->falta > PARTE_USB ? PARTE_USB : (uint32_t)c->falta;
+      if (!c->buf) c->buf = (uint8_t *)malloc(PARTE_USB);
+      if (!c->buf) {
+        conn_cerrar(c, "sin memoria, numero");
+        return 1;
+      }
+      if (mtp_traer(c->buf, c->pos, pedir) != 0) {
+        conn_cerrar(c, "fallo al leer del celular, numero");
+        return 1;
+      }
+      c->blen = pedir;
+      c->benv = 0;
+      c->pos += pedir;
+      c->falta -= pedir;
+      prog = 1;
+    }
+    long r = enviar_nb(c->fd, c->buf + c->benv, (long)(c->blen - c->benv));
+    if (r < 0) {
+      conn_cerrar(c, "cliente cerro, numero");
+      return 1;
+    }
+    if (r > 0) {
+      c->benv += (uint32_t)r;
+      c->total_env += r;
+      g_servido += r;
+      c->ultimo = ahora;
+      prog = 1;
+    }
+  }
+
+  if (c->fd >= 0 && ahora - c->ultimo > 120000) {
+    conn_cerrar(c, "conexion sin avance en 120 s, numero");
+    return 1;
+  }
+  return prog;
+}
+
+/* Manda la orden de instalacion a Remote Package Installer y deja la conexion
+   abierta (sin bloquear) para ver su respuesta mas tarde. 0 = bien */
+static int rpi_enviar(const char *url_pkg) {
+  if (g_rpi >= 0) {
+    close(g_rpi);
+    g_rpi = -1;
+  }
+  g_rpi_n = 0;
+  g_rpi_resp[0] = 0;
   int s = socket(AF_INET, SOCK_STREAM, 0);
   if (s < 0) {
     anotar("rpi socket fallo errno", errno);
     return -1;
   }
   struct timeval tv;
-  tv.tv_sec = 8;
+  tv.tv_sec = 3;
   tv.tv_usec = 0;
-  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
   struct sockaddr_in a;
   memset(&a, 0, sizeof(a));
@@ -648,28 +731,69 @@ static int pedir_instalacion(const char *url_pkg, char *resp, size_t n) {
     close(s);
     return -1;
   }
-  int total = 0;
-  while (total < (int)n - 1) {
-    int r = (int)recv(s, resp + total, n - 1 - total, 0);
-    if (r <= 0) break;
-    total += r;
+  poner_no_bloq(s);
+  g_rpi = s;
+  anotar("orden enviada a RPI, bytes", lp);
+  return 0;
+}
+
+static int rpi_paso(void) {
+  if (g_rpi < 0) return 0;
+  int r = (int)recv(g_rpi, g_rpi_resp + g_rpi_n, sizeof(g_rpi_resp) - 1 - (size_t)g_rpi_n, 0);
+  if (r > 0) {
+    g_rpi_n += r;
+    g_rpi_resp[g_rpi_n] = 0;
+    anotar("RPI respondio, bytes", g_rpi_n);
+    anotar(g_rpi_resp, 0);
+    return 1;
   }
-  resp[total] = 0;
-  close(s);
-  return total;
+  if (r == 0) {
+    anotar("RPI cerro la conexion, bytes recibidos", g_rpi_n);
+    close(g_rpi);
+    g_rpi = -1;
+    return 1;
+  }
+  if (errno != EAGAIN && errno != EWOULDBLOCK) {
+    anotar("rpi recv fallo errno", errno);
+    close(g_rpi);
+    g_rpi = -1;
+    return 1;
+  }
+  return 0;
+}
+
+/* Un paso del servidor: acepta conexiones nuevas y avanza las que haya. */
+static int paso(int srv) {
+  int prog = 0;
+  long ahora = ms_ahora();
+  while (1) {
+    struct sockaddr_in ca;
+    socklen_t cl = sizeof(ca);
+    int fd = accept(srv, (struct sockaddr *)&ca, &cl);
+    if (fd < 0) break;
+    conn_nueva(fd, ahora);
+    prog = 1;
+  }
+  for (int i = 0; i < MAXC; i++) {
+    if (conn_procesar(&cs[i], ahora)) prog = 1;
+  }
+  if (rpi_paso()) prog = 1;
+  if (!prog) usleep(2000);
+  return prog;
 }
 
 int main(void) {
   char msg[400];
   signal(SIGPIPE, SIG_IGN);
-  anotar("v20 arranco", 0);
-  avisar("v20: instalando desde el celular por USB...");
+  for (int i = 0; i < MAXC; i++) cs[i].fd = -1;
+  anotar("v21 arranco", 0);
+  avisar("v21: instalando desde el celular por USB...");
 
   int res = 0;
   int hu = sceKernelLoadStartModule("/system/common/lib/libSceUsbd.sprx", 0, NULL, 0, NULL, &res);
   anotar("cargar libSceUsbd", hu);
   if (hu < 0) {
-    avisar("v20: no pude cargar libSceUsbd (mira el log)");
+    avisar("v21: no pude cargar libSceUsbd (mira el log)");
     return 0;
   }
   void *fn[8];
@@ -678,7 +802,7 @@ int main(void) {
                             "sceUsbdReleaseInterface", "sceUsbdClose"};
   for (int i = 0; i < 8; i++) {
     if (resolver(hu, nombres[i], NULL, &fn[i]) != 0) {
-      avisar("v20: faltan funciones de USB (mira el log)");
+      avisar("v21: faltan funciones de USB (mira el log)");
       return 0;
     }
   }
@@ -708,20 +832,20 @@ int main(void) {
     }
   }
   if (!cel) {
-    avisar("v20: no encontre el celular (cable y modo Transferencia de archivos)");
+    avisar("v21: no encontre el celular (cable y modo Transferencia de archivos)");
     return 0;
   }
   void *h = NULL;
   r = p_abrir(cel, &h);
   anotar("abrir celular", r);
   if (r != 0 || !h) {
-    avisar("v20: no pude abrir el celular por USB (mira el log)");
+    avisar("v21: no pude abrir el celular por USB (mira el log)");
     return 0;
   }
   r = p_reclamar(h, 0);
   anotar("reclamar interfaz 0", r);
   if (r != 0) {
-    avisar("v20: no pude reclamar la interfaz USB del celular (mira el log)");
+    avisar("v21: no pude reclamar la interfaz USB del celular (mira el log)");
     p_cerrar(h);
     return 0;
   }
@@ -745,7 +869,7 @@ int main(void) {
     }
   }
   if (!dl) {
-    avisar("v20: no encontre la carpeta Download en el celular");
+    avisar("v21: no encontre la carpeta Download en el celular");
     cerrar_usb();
     return 0;
   }
@@ -770,13 +894,13 @@ int main(void) {
     }
   }
   if (!cand) {
-    avisar("v20: no hay un .pkg grande en la carpeta Download del celular");
+    avisar("v21: no hay un .pkg grande en la carpeta Download del celular");
     cerrar_usb();
     return 0;
   }
   g_obj = cand;
-  long tam = (long)ctam;
-  anotar("elegido, bytes", tam);
+  g_tam = (long)ctam;
+  anotar("elegido, bytes", g_tam);
 
   int srv = -1;
   for (int i = 0; i < PUERTOS_PROBAR && srv < 0; i++) {
@@ -786,7 +910,7 @@ int main(void) {
   anotar("servidor web (descriptor)", srv);
   anotar("servidor web (puerto)", g_puerto);
   if (srv < 0) {
-    avisar("v20: no pude abrir el servidor web interno (mira el log)");
+    avisar("v21: no pude abrir el servidor web interno (mira el log)");
     cerrar_usb();
     return 0;
   }
@@ -804,46 +928,57 @@ int main(void) {
   }
   snprintf(urls[1], sizeof(urls[1]), "http://127.0.0.1:%d/%s", g_puerto, NOMBRE);
 
-  static char resp[1500];
-  int conectado = 0;
-  for (int i = 0; i < 2 && !conectado; i++) {
+  for (int i = 0; i < 2 && g_conexiones == 0; i++) {
     if (urls[i][0] == 0) continue;
     anotar("pidiendo a Remote Package Installer", i + 1);
     anotar(urls[i], 0);
-    int nr = -1;
-    for (int k = 1; k <= 3; k++) {
-      nr = pedir_instalacion(urls[i], resp, sizeof(resp));
-      if (nr >= 0) break;
-      anotar("reintento de conexion con RPI", k);
-      sleep(3);
+    int ok = -1;
+    for (int k = 1; k <= 3 && ok != 0; k++) {
+      ok = rpi_enviar(urls[i]);
+      if (ok != 0) {
+        anotar("reintento de conexion con RPI", k);
+        sleep(3);
+      }
     }
-    anotar("respuesta de RPI (bytes)", nr);
-    if (nr > 0) anotar(resp, 0);
-    if (nr < 0) {
-      avisar("v20: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
+    if (ok != 0) {
+      avisar("v21: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
       close(srv);
       cerrar_usb();
       return 0;
     }
-    snprintf(msg, sizeof(msg), "v20: RPI respondio %d bytes (intento %d)", nr, i + 1);
+    snprintf(msg, sizeof(msg), "v21: orden enviada a Remote Package Installer (intento %d)", i + 1);
     avisar(msg);
-    conectado = esperar_conexion(srv, "", tam, 12000);
-    anotar("conexion recibida (0=no)", conectado);
+    long t0 = ms_ahora();
+    while (ms_ahora() - t0 < 15000 && g_conexiones == 0) paso(srv);
+    anotar("conexiones recibidas tras la orden", g_conexiones);
   }
-  if (!conectado) {
-    avisar("v20: nadie se conecto al servidor (mira el log)");
+  if (g_conexiones == 0) {
+    avisar("v21: nadie se conecto al servidor (mira el log)");
     close(srv);
+    if (g_rpi >= 0) close(g_rpi);
     cerrar_usb();
     return 0;
   }
 
-  servir(srv, "", tam);
+  long ult = ms_ahora();
+  while (1) {
+    int p = paso(srv);
+    long ahora = ms_ahora();
+    if (p) ult = ahora;
+    if (ahora - ult > 180000) break;
+  }
+
   anotar("servidor termino, conexiones", g_conexiones);
   anotar("servidor termino, enviado total", g_servido);
+  for (int i = 0; i < MAXC; i++) {
+    if (cs[i].fd >= 0) conn_cerrar(&cs[i], "cierro al terminar, conexion");
+  }
+  if (g_rpi >= 0) close(g_rpi);
+  close(srv);
   cerrar_usb();
   snprintf(msg, sizeof(msg),
-           "v20: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
-           g_conexiones, g_servido, tam);
+           "v21: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
+           g_conexiones, g_servido, g_tam);
   avisar(msg);
   return 0;
 }
