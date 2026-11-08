@@ -1,4 +1,4 @@
-/* REPO ps4-payload: v29 (instala desde el celular por USB; elige el .pkg que pida la app (puerto 9096), o instalar.pkg, y si no existe, el mas grande; servidor local con varias conexiones + Remote Package Installer) */
+/* REPO ps4-payload: v30 (instala desde el celular por USB; elige el .pkg que pida la app (puerto 9096), o instalar.pkg, y si no existe, el mas grande; servidor local con varias conexiones + Remote Package Installer) */
 #include <stdio.h>
 #include <signal.h>
 #include <string.h>
@@ -120,7 +120,7 @@ static int resolver(int h, const char *a, const char *b, void **fn) {
 #define CAP 16384
 #define CH 262144
 #define MAXH 256
-#define NOMB 256
+#define NOMB 1024
 
 static uint8_t datos[CAP];
 static uint8_t chunk[CH];
@@ -224,11 +224,34 @@ static int mtp_info(void *h, uint32_t handle, uint16_t *fmt, uint32_t *tam, char
   int ln = p[52];
   int k = 0;
   if (12 + 53 + 2 * ln <= total) {
-    for (int i = 0; i < ln && k < NOMB - 1; i++) {
-      uint8_t lo = p[53 + 2 * i];
-      uint8_t hi = p[53 + 2 * i + 1];
-      if (lo == 0 && hi == 0) break;
-      nombre[k++] = (hi == 0 && lo >= 32 && lo < 127) ? (char)lo : '?';
+    for (int i = 0; i < ln && k < NOMB - 5; i++) {
+      uint32_t cp = (uint32_t)p[53 + 2 * i] | ((uint32_t)p[53 + 2 * i + 1] << 8);
+      if (cp == 0) break;
+      if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < ln) {
+        uint32_t c2 = (uint32_t)p[53 + 2 * (i + 1)] | ((uint32_t)p[53 + 2 * (i + 1) + 1] << 8);
+        if (c2 >= 0xDC00 && c2 <= 0xDFFF) {
+          cp = 0x10000 + ((cp - 0xD800) << 10) + (c2 - 0xDC00);
+          i++;
+        }
+      }
+      /* UTF-16 del celular -> UTF-8 (para que coincida con el nombre que manda la app) */
+      if (cp < 32) {
+        nombre[k++] = '?';
+      } else if (cp < 0x80) {
+        nombre[k++] = (char)cp;
+      } else if (cp < 0x800) {
+        nombre[k++] = (char)(0xC0 | (cp >> 6));
+        nombre[k++] = (char)(0x80 | (cp & 0x3F));
+      } else if (cp < 0x10000) {
+        nombre[k++] = (char)(0xE0 | (cp >> 12));
+        nombre[k++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        nombre[k++] = (char)(0x80 | (cp & 0x3F));
+      } else {
+        nombre[k++] = (char)(0xF0 | (cp >> 18));
+        nombre[k++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        nombre[k++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        nombre[k++] = (char)(0x80 | (cp & 0x3F));
+      }
     }
   }
   nombre[k] = 0;
@@ -342,7 +365,7 @@ static const char *buscar_ci(const char *txt, const char *clave) {
 
 
 #define NOMBRE_ELEGIDO "instalar.pkg"
-static char g_pedido[256];   /* nombre del .pkg que pidio la app (vacio = ninguno) */
+static char g_pedido[1024];   /* nombre del .pkg que pidio la app (vacio = ninguno) */
 /* 1 si el nombre es el que pidio la app o, si no pidio ninguno, instalar.pkg (sin importar mayusculas) */
 static int es_elegido(const char *n) {
   const char *obj = g_pedido[0] ? g_pedido : NOMBRE_ELEGIDO;
@@ -606,7 +629,7 @@ static void conn_nueva(int fd, long ahora) {
     anotar("buffer de envio real", real);
   }
   anotar("conexion aceptada, numero", c->num);
-  if (c->num == 1) avisar("v29: el instalador se conecto al servidor");
+  if (c->num == 1) avisar("v30: el instalador se conecto al servidor");
 }
 
 /* Lee el pedido ya recibido y prepara la cabecera. 0 = bien */
@@ -752,7 +775,7 @@ static int conn_procesar(conn_t *c, long ahora) {
         uint32_t pedir = c->falta > PARTE_USB ? PARTE_USB : (uint32_t)c->falta;
         if (!c->buf) c->buf = (uint8_t *)malloc(pedir);
         if (!c->buf) {
-          avisar("v29: sin memoria en el payload. Reinicia la PS4 y prueba otra vez.");
+          avisar("v30: sin memoria en el payload. Reinicia la PS4 y prueba otra vez.");
           conn_cerrar(c, "sin memoria, numero");
           return 1;
         }
@@ -917,7 +940,7 @@ static void recibir_nombre(void) {
   }
   if (fd >= 0) {
     int n = 0;
-    while (n < 255 && ms_ahora() - t0 < 9000) {
+    while (n < 1023 && ms_ahora() - t0 < 9000) {
       char ch;
       long r = recv(fd, &ch, 1, 0);
       if (r == 1) {
@@ -945,15 +968,15 @@ int main(void) {
   char msg[400];
   signal(SIGPIPE, SIG_IGN);
   for (int i = 0; i < MAXC; i++) cs[i].fd = -1;
-  anotar("v29 arranco", 0);
-  avisar("v29: instalando desde el celular por USB...");
+  anotar("v30 arranco", 0);
+  avisar("v30: instalando desde el celular por USB...");
   recibir_nombre();
 
   int res = 0;
   int hu = sceKernelLoadStartModule("/system/common/lib/libSceUsbd.sprx", 0, NULL, 0, NULL, &res);
   anotar("cargar libSceUsbd", hu);
   if (hu < 0) {
-    avisar("v29: no pude cargar libSceUsbd (mira el log)");
+    avisar("v30: no pude cargar libSceUsbd (mira el log)");
     return 0;
   }
   void *fn[8];
@@ -962,7 +985,7 @@ int main(void) {
                             "sceUsbdReleaseInterface", "sceUsbdClose"};
   for (int i = 0; i < 8; i++) {
     if (resolver(hu, nombres[i], NULL, &fn[i]) != 0) {
-      avisar("v29: faltan funciones de USB (mira el log)");
+      avisar("v30: faltan funciones de USB (mira el log)");
       return 0;
     }
   }
@@ -1000,27 +1023,27 @@ int main(void) {
       int sp = ((int (*)(void *))fvel)(cel);
       anotar("velocidad negociada del enlace USB (3=alta 480 Mbps, 4=super 5 Gbps, 5=super+)", sp);
       const char *nom = sp == 3 ? "USB 2.0 (480 Mbps)" : sp == 4 ? "USB 3 (5 Gbps)" : sp == 5 ? "USB 3.1 (10 Gbps)" : sp == 2 ? "USB lento (12 Mbps)" : "desconocida";
-      snprintf(msg, sizeof(msg), "v29: enlace con el celular: %s", nom);
+      snprintf(msg, sizeof(msg), "v30: enlace con el celular: %s", nom);
       avisar(msg);
     } else {
       anotar("no pude leer la velocidad del enlace USB", 0);
     }
   }
   if (!cel) {
-    avisar("v29: no encontre el celular (cable y modo Transferencia de archivos)");
+    avisar("v30: no encontre el celular (cable y modo Transferencia de archivos)");
     return 0;
   }
   void *h = NULL;
   r = p_abrir(cel, &h);
   anotar("abrir celular", r);
   if (r != 0 || !h) {
-    avisar("v29: no pude abrir el celular por USB (mira el log)");
+    avisar("v30: no pude abrir el celular por USB (mira el log)");
     return 0;
   }
   r = p_reclamar(h, 0);
   anotar("reclamar interfaz 0", r);
   if (r != 0) {
-    avisar("v29: no pude reclamar la interfaz USB del celular (mira el log)");
+    avisar("v30: no pude reclamar la interfaz USB del celular (mira el log)");
     p_cerrar(h);
     return 0;
   }
@@ -1044,7 +1067,7 @@ int main(void) {
     }
   }
   if (!dl) {
-    avisar("v29: no encontre la carpeta Download en el celular");
+    avisar("v30: no encontre la carpeta Download en el celular");
     cerrar_usb();
     return 0;
   }
@@ -1074,13 +1097,13 @@ int main(void) {
     }
   }
   if (g_pedido[0] && !por_nombre) {
-    snprintf(msg, sizeof(msg), "v29: no encontre %s en la carpeta Download del celular", g_pedido);
+    snprintf(msg, sizeof(msg), "v30: no encontre %s en la carpeta Download del celular", g_pedido);
     avisar(msg);
     cerrar_usb();
     return 0;
   }
   if (!cand) {
-    avisar("v29: no hay un .pkg grande en la carpeta Download del celular");
+    avisar("v30: no hay un .pkg grande en la carpeta Download del celular");
     cerrar_usb();
     return 0;
   }
@@ -1096,7 +1119,7 @@ int main(void) {
   anotar("servidor web (descriptor)", srv);
   anotar("servidor web (puerto)", g_puerto);
   if (srv < 0) {
-    avisar("v29: no pude abrir el servidor web interno (mira el log)");
+    avisar("v30: no pude abrir el servidor web interno (mira el log)");
     cerrar_usb();
     return 0;
   }
@@ -1127,19 +1150,19 @@ int main(void) {
       }
     }
     if (ok != 0) {
-      avisar("v29: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
+      avisar("v30: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
       close(srv);
       cerrar_usb();
       return 0;
     }
-    snprintf(msg, sizeof(msg), "v29: orden enviada a Remote Package Installer (intento %d)", i + 1);
+    snprintf(msg, sizeof(msg), "v30: orden enviada a Remote Package Installer (intento %d)", i + 1);
     avisar(msg);
     long t0 = ms_ahora();
     while (ms_ahora() - t0 < 15000 && g_conexiones == 0) paso(srv);
     anotar("conexiones recibidas tras la orden", g_conexiones);
   }
   if (g_conexiones == 0) {
-    avisar("v29: nadie se conecto al servidor (mira el log)");
+    avisar("v30: nadie se conecto al servidor (mira el log)");
     close(srv);
     if (g_rpi >= 0) close(g_rpi);
     cerrar_usb();
@@ -1177,7 +1200,7 @@ int main(void) {
         ult_pct = pct;
         long seg = (ahora - t_ini) / 1000;
         if (seg < 1) seg = 1;
-        snprintf(msg, sizeof(msg), "v29: %d%% (%ld de %ld MB, %ld MB/s)", pct,
+        snprintf(msg, sizeof(msg), "v30: %d%% (%ld de %ld MB, %ld MB/s)", pct,
                  hecho / 1000000L, g_tam / 1000000L, hecho / 1000000L / seg);
         avisar(msg);
       }
@@ -1201,11 +1224,11 @@ int main(void) {
   if (g_listo) {
     long seg = (t_listo - t_ini) / 1000;
     if (seg < 1) seg = 1;
-    snprintf(msg, sizeof(msg), "v29: descarga completa (%ld MB en %ld s, %ld MB/s). Servidor cerrado.",
+    snprintf(msg, sizeof(msg), "v30: descarga completa (%ld MB en %ld s, %ld MB/s). Servidor cerrado.",
              g_tam / 1000000L, seg, g_tam / 1000000L / seg);
   } else {
     snprintf(msg, sizeof(msg),
-             "v29: servidor termino sin completar. conexiones=%d enviado=%ld de %ld bytes",
+             "v30: servidor termino sin completar. conexiones=%d enviado=%ld de %ld bytes",
              g_conexiones, g_servido, g_tam);
   }
   avisar(msg);
