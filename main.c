@@ -1,4 +1,4 @@
-/* REPO ps4-payload: v22 (instala desde el celular por USB; elige el .pkg llamado instalar.pkg, y si no existe, el mas grande; servidor local con varias conexiones + Remote Package Installer) */
+/* REPO ps4-payload: v23 (instala desde el celular por USB; elige el .pkg llamado instalar.pkg, y si no existe, el mas grande; servidor local con varias conexiones + Remote Package Installer) */
 #include <stdio.h>
 #include <signal.h>
 #include <string.h>
@@ -408,7 +408,7 @@ static int abrir_servidor(int puerto) {
 static void *g_h = NULL;      /* celular abierto por USB */
 static uint32_t g_obj = 0;    /* objeto MTP del .pkg elegido */
 static long g_tam = 0;        /* tamano del .pkg */
-#define PARTE_USB 1048576u
+#define PARTE_USB 4194304u
 #define MAXC 8
 
 static void cerrar_usb(void) {
@@ -517,8 +517,17 @@ static void conn_nueva(int fd, long ahora) {
   c->ultimo = ahora;
   c->num = ++g_conexiones;
   poner_no_bloq(fd);
+  /* buffer de envio grande: el kernel sigue mandando por Wi-Fi mientras se lee el siguiente trozo del celular */
+  int sb = 4194304;
+  setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sb, sizeof(sb));
+  if (c->num <= 2) {
+    int real = 0;
+    socklen_t rl = sizeof(real);
+    getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &real, &rl);
+    anotar("buffer de envio real", real);
+  }
   anotar("conexion aceptada, numero", c->num);
-  if (c->num == 1) avisar("v22: el instalador se conecto al servidor");
+  if (c->num == 1) avisar("v23: el instalador se conecto al servidor");
 }
 
 /* Lee el pedido ya recibido y prepara la cabecera. 0 = bien */
@@ -793,14 +802,14 @@ int main(void) {
   char msg[400];
   signal(SIGPIPE, SIG_IGN);
   for (int i = 0; i < MAXC; i++) cs[i].fd = -1;
-  anotar("v22 arranco", 0);
-  avisar("v22: instalando desde el celular por USB...");
+  anotar("v23 arranco", 0);
+  avisar("v23: instalando desde el celular por USB...");
 
   int res = 0;
   int hu = sceKernelLoadStartModule("/system/common/lib/libSceUsbd.sprx", 0, NULL, 0, NULL, &res);
   anotar("cargar libSceUsbd", hu);
   if (hu < 0) {
-    avisar("v22: no pude cargar libSceUsbd (mira el log)");
+    avisar("v23: no pude cargar libSceUsbd (mira el log)");
     return 0;
   }
   void *fn[8];
@@ -809,7 +818,7 @@ int main(void) {
                             "sceUsbdReleaseInterface", "sceUsbdClose"};
   for (int i = 0; i < 8; i++) {
     if (resolver(hu, nombres[i], NULL, &fn[i]) != 0) {
-      avisar("v22: faltan funciones de USB (mira el log)");
+      avisar("v23: faltan funciones de USB (mira el log)");
       return 0;
     }
   }
@@ -839,20 +848,20 @@ int main(void) {
     }
   }
   if (!cel) {
-    avisar("v22: no encontre el celular (cable y modo Transferencia de archivos)");
+    avisar("v23: no encontre el celular (cable y modo Transferencia de archivos)");
     return 0;
   }
   void *h = NULL;
   r = p_abrir(cel, &h);
   anotar("abrir celular", r);
   if (r != 0 || !h) {
-    avisar("v22: no pude abrir el celular por USB (mira el log)");
+    avisar("v23: no pude abrir el celular por USB (mira el log)");
     return 0;
   }
   r = p_reclamar(h, 0);
   anotar("reclamar interfaz 0", r);
   if (r != 0) {
-    avisar("v22: no pude reclamar la interfaz USB del celular (mira el log)");
+    avisar("v23: no pude reclamar la interfaz USB del celular (mira el log)");
     p_cerrar(h);
     return 0;
   }
@@ -876,7 +885,7 @@ int main(void) {
     }
   }
   if (!dl) {
-    avisar("v22: no encontre la carpeta Download en el celular");
+    avisar("v23: no encontre la carpeta Download en el celular");
     cerrar_usb();
     return 0;
   }
@@ -906,7 +915,7 @@ int main(void) {
     }
   }
   if (!cand) {
-    avisar("v22: no hay un .pkg grande en la carpeta Download del celular");
+    avisar("v23: no hay un .pkg grande en la carpeta Download del celular");
     cerrar_usb();
     return 0;
   }
@@ -922,7 +931,7 @@ int main(void) {
   anotar("servidor web (descriptor)", srv);
   anotar("servidor web (puerto)", g_puerto);
   if (srv < 0) {
-    avisar("v22: no pude abrir el servidor web interno (mira el log)");
+    avisar("v23: no pude abrir el servidor web interno (mira el log)");
     cerrar_usb();
     return 0;
   }
@@ -953,19 +962,19 @@ int main(void) {
       }
     }
     if (ok != 0) {
-      avisar("v22: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
+      avisar("v23: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
       close(srv);
       cerrar_usb();
       return 0;
     }
-    snprintf(msg, sizeof(msg), "v22: orden enviada a Remote Package Installer (intento %d)", i + 1);
+    snprintf(msg, sizeof(msg), "v23: orden enviada a Remote Package Installer (intento %d)", i + 1);
     avisar(msg);
     long t0 = ms_ahora();
     while (ms_ahora() - t0 < 15000 && g_conexiones == 0) paso(srv);
     anotar("conexiones recibidas tras la orden", g_conexiones);
   }
   if (g_conexiones == 0) {
-    avisar("v22: nadie se conecto al servidor (mira el log)");
+    avisar("v23: nadie se conecto al servidor (mira el log)");
     close(srv);
     if (g_rpi >= 0) close(g_rpi);
     cerrar_usb();
@@ -989,7 +998,7 @@ int main(void) {
   close(srv);
   cerrar_usb();
   snprintf(msg, sizeof(msg),
-           "v22: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
+           "v23: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
            g_conexiones, g_servido, g_tam);
   avisar(msg);
   return 0;
