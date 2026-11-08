@@ -1,4 +1,4 @@
-/* REPO ps4-payload: v25 (instala desde el celular por USB; elige el .pkg llamado instalar.pkg, y si no existe, el mas grande; servidor local con varias conexiones + Remote Package Installer) */
+/* REPO ps4-payload: v26 (instala desde el celular por USB; elige el .pkg llamado instalar.pkg, y si no existe, el mas grande; servidor local con varias conexiones + Remote Package Installer) */
 #include <stdio.h>
 #include <signal.h>
 #include <string.h>
@@ -421,44 +421,77 @@ static void cerrar_usb(void) {
 }
 
 /* Trae 'len' bytes del archivo desde 'off' leyendolos del celular. 0 = bien */
-static int mtp_traer(uint8_t *dest, uint64_t off, uint32_t len) {
+/* Lectura del celular por pasos: se pide un trozo y luego se va leyendo de a 256 KB,
+   para poder ir mandando a la PS4 mientras llegan los datos. Solo un trozo a la vez. */
+static struct {
+  int activo;
+  uint32_t len, parte, falta, recibido;
+  int cab;
+} g_rd;
+
+static int mtp_ini(uint64_t off, uint32_t len) {
   if (mtp_enviar(g_h, 0x95C1, 4, g_obj, (uint32_t)(off & 0xFFFFFFFFULL),
                  (uint32_t)(off >> 32), len) != 0) {
     return -1;
   }
+  g_rd.activo = 1;
+  g_rd.len = len;
+  g_rd.parte = 0;
+  g_rd.falta = 0;
+  g_rd.recibido = 0;
+  g_rd.cab = 0;
+  return 0;
+}
+
+/* Lee un pedazo. dest puede ser NULL (se descarta). Devuelve 0 = sigue, 1 = termino, -1 = error */
+static int mtp_paso(uint8_t *dest) {
   int got = 0;
   int r = mtp_leer(g_h, chunk, CH, &got);
-  if (r != 0 || got < 12 || rd16(chunk + 4) != 2) {
-    anotar("USB: fallo al leer, r", r);
-    anotar("USB: codigo", got >= 8 ? rd16(chunk + 6) : 0);
-    return -1;
-  }
-  uint32_t falta = rd32(chunk) - 12;
-  uint32_t parte = (uint32_t)(got - 12);
-  if (parte > len) parte = len;
-  memcpy(dest, chunk + 12, parte);
-  uint32_t recibido = (uint32_t)(got - 12);
-  while (recibido < falta) {
-    got = 0;
-    r = mtp_leer(g_h, chunk, CH, &got);
-    if (r != 0 || got <= 0) {
-      anotar("USB: lectura cortada, r", r);
+  if (!g_rd.cab) {
+    if (r != 0 || got < 12 || rd16(chunk + 4) != 2) {
+      anotar("USB: fallo al leer, r", r);
+      anotar("USB: codigo", got >= 8 ? rd16(chunk + 6) : 0);
+      g_rd.activo = 0;
       return -1;
     }
-    if (parte < len) {
-      uint32_t cp = (uint32_t)got;
-      if (parte + cp > len) cp = len - parte;
-      memcpy(dest + parte, chunk, cp);
-      parte += cp;
+    g_rd.falta = rd32(chunk) - 12;
+    uint32_t cp = (uint32_t)(got - 12);
+    if (cp > g_rd.len) cp = g_rd.len;
+    if (dest) memcpy(dest, chunk + 12, cp);
+    g_rd.parte = cp;
+    g_rd.recibido = (uint32_t)(got - 12);
+    g_rd.cab = 1;
+  } else {
+    if (r != 0 || got <= 0) {
+      anotar("USB: lectura cortada, r", r);
+      g_rd.activo = 0;
+      return -1;
     }
-    recibido += (uint32_t)got;
+    if (g_rd.parte < g_rd.len) {
+      uint32_t cp = (uint32_t)got;
+      if (g_rd.parte + cp > g_rd.len) cp = g_rd.len - g_rd.parte;
+      if (dest) memcpy(dest + g_rd.parte, chunk, cp);
+      g_rd.parte += cp;
+    }
+    g_rd.recibido += (uint32_t)got;
   }
-  mtp_respuesta(g_h);
-  if (parte != len) {
-    anotar("USB: llegaron menos bytes de los pedidos", (long)parte);
-    return -1;
+  if (g_rd.recibido >= g_rd.falta) {
+    mtp_respuesta(g_h);
+    g_rd.activo = 0;
+    if (g_rd.parte != g_rd.len) {
+      anotar("USB: llegaron menos bytes de los pedidos", (long)g_rd.parte);
+      return -1;
+    }
+    return 1;
   }
   return 0;
+}
+
+/* Si una conexion se cierra a medio trozo, hay que terminar de leerlo para no dejar el USB a medias */
+static void mtp_drenar(void) {
+  while (g_rd.activo) {
+    if (mtp_paso(NULL) != 0) break;
+  }
 }
 
 typedef struct {
@@ -471,6 +504,7 @@ typedef struct {
   int lcab;
   int cab_env;
   int es_head;
+  int lee;               /* 1 = esta conexion esta leyendo un trozo del celular */
   uint64_t ini_pedido;   /* primer byte que pidio este pedido */
   uint64_t pos;          /* proximo byte del archivo por traer del celular */
   uint64_t falta;        /* bytes del archivo que aun no se traen */
@@ -523,6 +557,10 @@ static void cov_agregar(uint64_t a, uint64_t b) {
 
 static void conn_cerrar(conn_t *c, const char *motivo) {
   if (c->fd < 0) return;
+  if (c->lee) {
+    mtp_drenar();
+    c->lee = 0;
+  }
   /* si la PS4 cerro a medias (lo hace normal con los primeros bytes), lo enviado cuenta como recibido */
   if (c->estado == 3 && !c->es_head && c->total_env > 0 && strncmp(motivo, "cliente cerro", 13) == 0) {
     cov_agregar(c->ini_pedido, c->ini_pedido + (uint64_t)c->total_env);
@@ -562,7 +600,7 @@ static void conn_nueva(int fd, long ahora) {
     anotar("buffer de envio real", real);
   }
   anotar("conexion aceptada, numero", c->num);
-  if (c->num == 1) avisar("v25: el instalador se conecto al servidor");
+  if (c->num == 1) avisar("v26: el instalador se conecto al servidor");
 }
 
 /* Lee el pedido ya recibido y prepara la cabecera. 0 = bien */
@@ -697,37 +735,57 @@ static int conn_procesar(conn_t *c, long ahora) {
   }
 
   if (c->fd >= 0 && c->estado == 3) {
-    if (c->benv >= c->blen) {
+    /* 1) si ya se envio todo lo traido, empezar el siguiente trozo (si el USB esta libre) */
+    if (!c->lee && c->benv >= c->blen) {
       if (c->falta == 0) {
         if (!c->es_head) cov_agregar(c->ini_pedido, c->pos);
         conn_cerrar(c, "pedido completo, numero");
         return 1;
       }
-      uint32_t pedir = c->falta > PARTE_USB ? PARTE_USB : (uint32_t)c->falta;
-      if (!c->buf) c->buf = (uint8_t *)malloc(PARTE_USB);
-      if (!c->buf) {
-        conn_cerrar(c, "sin memoria, numero");
+      if (!g_rd.activo) {
+        uint32_t pedir = c->falta > PARTE_USB ? PARTE_USB : (uint32_t)c->falta;
+        if (!c->buf) c->buf = (uint8_t *)malloc(PARTE_USB);
+        if (!c->buf) {
+          conn_cerrar(c, "sin memoria, numero");
+          return 1;
+        }
+        if (mtp_ini(c->pos, pedir) != 0) {
+          conn_cerrar(c, "fallo al leer del celular, numero");
+          return 1;
+        }
+        c->lee = 1;
+        c->blen = 0;
+        c->benv = 0;
+        c->pos += pedir;
+        c->falta -= pedir;
+        prog = 1;
+      }
+    }
+    /* 2) mandar lo que ya llego */
+    if (c->benv < c->blen) {
+      long r = enviar_nb(c->fd, c->buf + c->benv, (long)(c->blen - c->benv));
+      if (r < 0) {
+        conn_cerrar(c, "cliente cerro, numero");
         return 1;
       }
-      if (mtp_traer(c->buf, c->pos, pedir) != 0) {
+      if (r > 0) {
+        c->benv += (uint32_t)r;
+        c->total_env += r;
+        g_servido += r;
+        c->ultimo = ahora;
+        prog = 1;
+      }
+    }
+    /* 3) leer un pedazo mas del celular mientras el kernel manda lo anterior por Wi-Fi */
+    if (c->lee) {
+      int rr = mtp_paso(c->buf + 0);
+      if (rr < 0) {
+        c->lee = 0;
         conn_cerrar(c, "fallo al leer del celular, numero");
         return 1;
       }
-      c->blen = pedir;
-      c->benv = 0;
-      c->pos += pedir;
-      c->falta -= pedir;
-      prog = 1;
-    }
-    long r = enviar_nb(c->fd, c->buf + c->benv, (long)(c->blen - c->benv));
-    if (r < 0) {
-      conn_cerrar(c, "cliente cerro, numero");
-      return 1;
-    }
-    if (r > 0) {
-      c->benv += (uint32_t)r;
-      c->total_env += r;
-      g_servido += r;
+      c->blen = g_rd.parte;
+      if (rr == 1) c->lee = 0;
       c->ultimo = ahora;
       prog = 1;
     }
@@ -839,14 +897,14 @@ int main(void) {
   char msg[400];
   signal(SIGPIPE, SIG_IGN);
   for (int i = 0; i < MAXC; i++) cs[i].fd = -1;
-  anotar("v25 arranco", 0);
-  avisar("v25: instalando desde el celular por USB...");
+  anotar("v26 arranco", 0);
+  avisar("v26: instalando desde el celular por USB...");
 
   int res = 0;
   int hu = sceKernelLoadStartModule("/system/common/lib/libSceUsbd.sprx", 0, NULL, 0, NULL, &res);
   anotar("cargar libSceUsbd", hu);
   if (hu < 0) {
-    avisar("v25: no pude cargar libSceUsbd (mira el log)");
+    avisar("v26: no pude cargar libSceUsbd (mira el log)");
     return 0;
   }
   void *fn[8];
@@ -855,7 +913,7 @@ int main(void) {
                             "sceUsbdReleaseInterface", "sceUsbdClose"};
   for (int i = 0; i < 8; i++) {
     if (resolver(hu, nombres[i], NULL, &fn[i]) != 0) {
-      avisar("v25: faltan funciones de USB (mira el log)");
+      avisar("v26: faltan funciones de USB (mira el log)");
       return 0;
     }
   }
@@ -885,20 +943,20 @@ int main(void) {
     }
   }
   if (!cel) {
-    avisar("v25: no encontre el celular (cable y modo Transferencia de archivos)");
+    avisar("v26: no encontre el celular (cable y modo Transferencia de archivos)");
     return 0;
   }
   void *h = NULL;
   r = p_abrir(cel, &h);
   anotar("abrir celular", r);
   if (r != 0 || !h) {
-    avisar("v25: no pude abrir el celular por USB (mira el log)");
+    avisar("v26: no pude abrir el celular por USB (mira el log)");
     return 0;
   }
   r = p_reclamar(h, 0);
   anotar("reclamar interfaz 0", r);
   if (r != 0) {
-    avisar("v25: no pude reclamar la interfaz USB del celular (mira el log)");
+    avisar("v26: no pude reclamar la interfaz USB del celular (mira el log)");
     p_cerrar(h);
     return 0;
   }
@@ -922,7 +980,7 @@ int main(void) {
     }
   }
   if (!dl) {
-    avisar("v25: no encontre la carpeta Download en el celular");
+    avisar("v26: no encontre la carpeta Download en el celular");
     cerrar_usb();
     return 0;
   }
@@ -952,7 +1010,7 @@ int main(void) {
     }
   }
   if (!cand) {
-    avisar("v25: no hay un .pkg grande en la carpeta Download del celular");
+    avisar("v26: no hay un .pkg grande en la carpeta Download del celular");
     cerrar_usb();
     return 0;
   }
@@ -968,7 +1026,7 @@ int main(void) {
   anotar("servidor web (descriptor)", srv);
   anotar("servidor web (puerto)", g_puerto);
   if (srv < 0) {
-    avisar("v25: no pude abrir el servidor web interno (mira el log)");
+    avisar("v26: no pude abrir el servidor web interno (mira el log)");
     cerrar_usb();
     return 0;
   }
@@ -999,19 +1057,19 @@ int main(void) {
       }
     }
     if (ok != 0) {
-      avisar("v25: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
+      avisar("v26: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
       close(srv);
       cerrar_usb();
       return 0;
     }
-    snprintf(msg, sizeof(msg), "v25: orden enviada a Remote Package Installer (intento %d)", i + 1);
+    snprintf(msg, sizeof(msg), "v26: orden enviada a Remote Package Installer (intento %d)", i + 1);
     avisar(msg);
     long t0 = ms_ahora();
     while (ms_ahora() - t0 < 15000 && g_conexiones == 0) paso(srv);
     anotar("conexiones recibidas tras la orden", g_conexiones);
   }
   if (g_conexiones == 0) {
-    avisar("v25: nadie se conecto al servidor (mira el log)");
+    avisar("v26: nadie se conecto al servidor (mira el log)");
     close(srv);
     if (g_rpi >= 0) close(g_rpi);
     cerrar_usb();
@@ -1021,10 +1079,15 @@ int main(void) {
   long ult = ms_ahora();
   long t_ini = ult;
   int ult_pct = 0;
+  long t_listo = 0;
   while (1) {
     int p = paso(srv);
     long ahora = ms_ahora();
     if (p) ult = ahora;
+    if (g_listo && !t_listo) {
+      t_listo = ahora;
+      anotar("descarga completa en segundos", (t_listo - t_ini) / 1000);
+    }
     if (ahora - ult > 180000) break;
     if (g_listo && ahora - ult > 15000) {
       anotar("descarga completa, cierro el servidor", 0);
@@ -1044,7 +1107,7 @@ int main(void) {
         ult_pct = pct;
         long seg = (ahora - t_ini) / 1000;
         if (seg < 1) seg = 1;
-        snprintf(msg, sizeof(msg), "v25: %d%% (%ld de %ld MB, %ld MB/s)", pct,
+        snprintf(msg, sizeof(msg), "v26: %d%% (%ld de %ld MB, %ld MB/s)", pct,
                  hecho / 1000000L, g_tam / 1000000L, hecho / 1000000L / seg);
         avisar(msg);
       }
@@ -1060,10 +1123,13 @@ int main(void) {
   close(srv);
   cerrar_usb();
   if (g_listo) {
-    snprintf(msg, sizeof(msg), "v25: descarga completa (%ld MB). Servidor cerrado.", g_tam / 1000000L);
+    long seg = (t_listo - t_ini) / 1000;
+    if (seg < 1) seg = 1;
+    snprintf(msg, sizeof(msg), "v26: descarga completa (%ld MB en %ld s, %ld MB/s). Servidor cerrado.",
+             g_tam / 1000000L, seg, g_tam / 1000000L / seg);
   } else {
     snprintf(msg, sizeof(msg),
-             "v25: servidor termino sin completar. conexiones=%d enviado=%ld de %ld bytes",
+             "v26: servidor termino sin completar. conexiones=%d enviado=%ld de %ld bytes",
              g_conexiones, g_servido, g_tam);
   }
   avisar(msg);
