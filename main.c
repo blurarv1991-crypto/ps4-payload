@@ -1,4 +1,4 @@
-/* REPO ps4-payload: v23 (instala desde el celular por USB; elige el .pkg llamado instalar.pkg, y si no existe, el mas grande; servidor local con varias conexiones + Remote Package Installer) */
+/* REPO ps4-payload: v24 (instala desde el celular por USB; elige el .pkg llamado instalar.pkg, y si no existe, el mas grande; servidor local con varias conexiones + Remote Package Installer) */
 #include <stdio.h>
 #include <signal.h>
 #include <string.h>
@@ -471,6 +471,7 @@ typedef struct {
   int lcab;
   int cab_env;
   int es_head;
+  uint64_t ini_pedido;   /* primer byte que pidio este pedido */
   uint64_t pos;          /* proximo byte del archivo por traer del celular */
   uint64_t falta;        /* bytes del archivo que aun no se traen */
   uint8_t *buf;          /* datos ya traidos del celular */
@@ -488,6 +489,36 @@ static int g_rpi_n = 0;
 static void poner_no_bloq(int fd) {
   int fl = fcntl(fd, F_GETFL, 0);
   fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+}
+
+/* Rangos del archivo ya entregados por completo (para saber cuando termino la descarga) */
+#define MAXCOV 64
+static uint64_t cov_a[MAXCOV], cov_b[MAXCOV];
+static int cov_n = 0;
+static int g_listo = 0;       /* 1 = la PS4 ya recibio todo el archivo */
+
+static void cov_agregar(uint64_t a, uint64_t b) {
+  if (b <= a) return;
+  int i = 0;
+  while (i < cov_n) {
+    if (a <= cov_b[i] && b >= cov_a[i]) { /* se toca o se solapa: unir */
+      if (cov_a[i] < a) a = cov_a[i];
+      if (cov_b[i] > b) b = cov_b[i];
+      for (int k = i; k < cov_n - 1; k++) {
+        cov_a[k] = cov_a[k + 1];
+        cov_b[k] = cov_b[k + 1];
+      }
+      cov_n--;
+    } else {
+      i++;
+    }
+  }
+  if (cov_n < MAXCOV) {
+    cov_a[cov_n] = a;
+    cov_b[cov_n] = b;
+    cov_n++;
+  }
+  if (cov_n == 1 && cov_a[0] == 0 && cov_b[0] >= (uint64_t)g_tam) g_listo = 1;
 }
 
 static void conn_cerrar(conn_t *c, const char *motivo) {
@@ -527,7 +558,7 @@ static void conn_nueva(int fd, long ahora) {
     anotar("buffer de envio real", real);
   }
   anotar("conexion aceptada, numero", c->num);
-  if (c->num == 1) avisar("v23: el instalador se conecto al servidor");
+  if (c->num == 1) avisar("v24: el instalador se conecto al servidor");
 }
 
 /* Lee el pedido ya recibido y prepara la cabecera. 0 = bien */
@@ -592,6 +623,7 @@ static int conn_preparar(conn_t *c) {
   }
   anotar(c->es_head ? "pedido HEAD, ini" : "pedido GET, ini", ini);
   anotar("pedido fin", fin);
+  c->ini_pedido = (uint64_t)ini;
   c->pos = (uint64_t)ini;
   c->falta = (uint64_t)largo;
   c->cab_env = 0;
@@ -663,6 +695,7 @@ static int conn_procesar(conn_t *c, long ahora) {
   if (c->fd >= 0 && c->estado == 3) {
     if (c->benv >= c->blen) {
       if (c->falta == 0) {
+        if (!c->es_head) cov_agregar(c->ini_pedido, c->pos);
         conn_cerrar(c, "pedido completo, numero");
         return 1;
       }
@@ -802,14 +835,14 @@ int main(void) {
   char msg[400];
   signal(SIGPIPE, SIG_IGN);
   for (int i = 0; i < MAXC; i++) cs[i].fd = -1;
-  anotar("v23 arranco", 0);
-  avisar("v23: instalando desde el celular por USB...");
+  anotar("v24 arranco", 0);
+  avisar("v24: instalando desde el celular por USB...");
 
   int res = 0;
   int hu = sceKernelLoadStartModule("/system/common/lib/libSceUsbd.sprx", 0, NULL, 0, NULL, &res);
   anotar("cargar libSceUsbd", hu);
   if (hu < 0) {
-    avisar("v23: no pude cargar libSceUsbd (mira el log)");
+    avisar("v24: no pude cargar libSceUsbd (mira el log)");
     return 0;
   }
   void *fn[8];
@@ -818,7 +851,7 @@ int main(void) {
                             "sceUsbdReleaseInterface", "sceUsbdClose"};
   for (int i = 0; i < 8; i++) {
     if (resolver(hu, nombres[i], NULL, &fn[i]) != 0) {
-      avisar("v23: faltan funciones de USB (mira el log)");
+      avisar("v24: faltan funciones de USB (mira el log)");
       return 0;
     }
   }
@@ -848,20 +881,20 @@ int main(void) {
     }
   }
   if (!cel) {
-    avisar("v23: no encontre el celular (cable y modo Transferencia de archivos)");
+    avisar("v24: no encontre el celular (cable y modo Transferencia de archivos)");
     return 0;
   }
   void *h = NULL;
   r = p_abrir(cel, &h);
   anotar("abrir celular", r);
   if (r != 0 || !h) {
-    avisar("v23: no pude abrir el celular por USB (mira el log)");
+    avisar("v24: no pude abrir el celular por USB (mira el log)");
     return 0;
   }
   r = p_reclamar(h, 0);
   anotar("reclamar interfaz 0", r);
   if (r != 0) {
-    avisar("v23: no pude reclamar la interfaz USB del celular (mira el log)");
+    avisar("v24: no pude reclamar la interfaz USB del celular (mira el log)");
     p_cerrar(h);
     return 0;
   }
@@ -885,7 +918,7 @@ int main(void) {
     }
   }
   if (!dl) {
-    avisar("v23: no encontre la carpeta Download en el celular");
+    avisar("v24: no encontre la carpeta Download en el celular");
     cerrar_usb();
     return 0;
   }
@@ -915,7 +948,7 @@ int main(void) {
     }
   }
   if (!cand) {
-    avisar("v23: no hay un .pkg grande en la carpeta Download del celular");
+    avisar("v24: no hay un .pkg grande en la carpeta Download del celular");
     cerrar_usb();
     return 0;
   }
@@ -931,7 +964,7 @@ int main(void) {
   anotar("servidor web (descriptor)", srv);
   anotar("servidor web (puerto)", g_puerto);
   if (srv < 0) {
-    avisar("v23: no pude abrir el servidor web interno (mira el log)");
+    avisar("v24: no pude abrir el servidor web interno (mira el log)");
     cerrar_usb();
     return 0;
   }
@@ -962,19 +995,19 @@ int main(void) {
       }
     }
     if (ok != 0) {
-      avisar("v23: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
+      avisar("v24: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
       close(srv);
       cerrar_usb();
       return 0;
     }
-    snprintf(msg, sizeof(msg), "v23: orden enviada a Remote Package Installer (intento %d)", i + 1);
+    snprintf(msg, sizeof(msg), "v24: orden enviada a Remote Package Installer (intento %d)", i + 1);
     avisar(msg);
     long t0 = ms_ahora();
     while (ms_ahora() - t0 < 15000 && g_conexiones == 0) paso(srv);
     anotar("conexiones recibidas tras la orden", g_conexiones);
   }
   if (g_conexiones == 0) {
-    avisar("v23: nadie se conecto al servidor (mira el log)");
+    avisar("v24: nadie se conecto al servidor (mira el log)");
     close(srv);
     if (g_rpi >= 0) close(g_rpi);
     cerrar_usb();
@@ -982,11 +1015,31 @@ int main(void) {
   }
 
   long ult = ms_ahora();
+  long t_ini = ult;
+  int ult_pct = 0;
   while (1) {
     int p = paso(srv);
     long ahora = ms_ahora();
     if (p) ult = ahora;
     if (ahora - ult > 180000) break;
+    if (g_listo && ahora - ult > 15000) {
+      anotar("descarga completa, cierro el servidor", 0);
+      break;
+    }
+    if (g_tam >= 200000000L && !g_listo) {
+      long hecho = g_servido < g_tam ? g_servido : g_tam;
+      int pct = (int)(hecho * 100 / g_tam);
+      if (pct >= 99) pct = 99;
+      pct = pct / 10 * 10;
+      if (pct > ult_pct) {
+        ult_pct = pct;
+        long seg = (ahora - t_ini) / 1000;
+        if (seg < 1) seg = 1;
+        snprintf(msg, sizeof(msg), "v24: %d%% (%ld de %ld MB, %ld MB/s)", pct,
+                 hecho / 1000000L, g_tam / 1000000L, hecho / 1000000L / seg);
+        avisar(msg);
+      }
+    }
   }
 
   anotar("servidor termino, conexiones", g_conexiones);
@@ -997,9 +1050,13 @@ int main(void) {
   if (g_rpi >= 0) close(g_rpi);
   close(srv);
   cerrar_usb();
-  snprintf(msg, sizeof(msg),
-           "v23: servidor termino. conexiones=%d enviado=%ld de %ld bytes",
-           g_conexiones, g_servido, g_tam);
+  if (g_listo) {
+    snprintf(msg, sizeof(msg), "v24: descarga completa (%ld MB). Servidor cerrado.", g_tam / 1000000L);
+  } else {
+    snprintf(msg, sizeof(msg),
+             "v24: servidor termino sin completar. conexiones=%d enviado=%ld de %ld bytes",
+             g_conexiones, g_servido, g_tam);
+  }
   avisar(msg);
   return 0;
 }
