@@ -4,6 +4,13 @@ on:
   workflow_dispatch:
   push:
 
+permissions:
+  contents: write
+
+concurrency:
+  group: payload
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -44,3 +51,14 @@ jobs:
         with:
           name: aviso-elf
           path: salida/aviso.elf
+
+      - name: Publicar el .elf en Releases (para que la app lo descargue)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest salida/aviso.elf \
+            --target "${{ github.sha }}" \
+            --title "Payload más reciente" \
+            --notes "Compilado automáticamente desde el commit ${{ github.sha }}"
