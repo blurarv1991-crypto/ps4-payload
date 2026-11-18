@@ -1,4 +1,4 @@
-/* REPO ps4-payload: v35 (instala desde el celular por USB; elige el .pkg que pida la app (puerto 9096), o instalar.pkg, y si no existe, el mas grande; servidor local con varias conexiones + Remote Package Installer) */
+/* REPO ps4-payload: v34 (instala desde el celular por USB; elige el .pkg que pida la app (puerto 9096), o instalar.pkg, y si no existe, el mas grande; servidor local con varias conexiones + Remote Package Installer) */
 #include <stdio.h>
 #include <signal.h>
 #include <string.h>
@@ -141,12 +141,8 @@ static int resolver(int h, const char *a, const char *b, void **fn) {
 
 
 /* ---------- USB / MTP desde el payload (prueba) ---------- */
-/* interfaz y endpoints del celular: por defecto los de siempre (Xiaomi); otros celulares se detectan por su descriptor */
-static unsigned char g_ep_in = 0x81;
-static unsigned char g_ep_out = 0x01;
-static int g_iface = 0;
-#define EP_IN g_ep_in
-#define EP_OUT g_ep_out
+#define EP_IN 0x81
+#define EP_OUT 0x01
 #define CAP 16384
 #define CH 262144
 #define MAXH 256
@@ -170,7 +166,6 @@ static int (*p_reclamar)(void *, int);
 static int (*p_bulk)(void *, unsigned char, unsigned char *, int, int *, unsigned int);
 static int (*p_soltar)(void *, int);
 static int (*p_cerrar)(void *);
-static int (*p_ctrl)(void *, uint8_t, uint8_t, uint16_t, uint16_t, unsigned char *, uint16_t, unsigned int);
 
 static int mtp_enviar(void *h, uint16_t code, int np, uint32_t p1, uint32_t p2, uint32_t p3, uint32_t p4) {
   uint8_t b[28];
@@ -660,7 +655,7 @@ static void conn_nueva(int fd, long ahora) {
     anotar("buffer de envio real", real);
   }
   anotar("conexion aceptada, numero", c->num);
-  if (c->num == 1) avisar("v35: el instalador se conecto al servidor");
+  if (c->num == 1) avisar("v34: el instalador se conecto al servidor");
 }
 
 /* Lee el pedido ya recibido y prepara la cabecera. 0 = bien */
@@ -806,7 +801,7 @@ static int conn_procesar(conn_t *c, long ahora) {
         uint32_t pedir = c->falta > PARTE_USB ? PARTE_USB : (uint32_t)c->falta;
         if (!c->buf) c->buf = (uint8_t *)malloc(pedir);
         if (!c->buf) {
-          avisar("v35: sin memoria en el payload. Reinicia la PS4 y prueba otra vez.");
+          avisar("v34: sin memoria en el payload. Reinicia la PS4 y prueba otra vez.");
           conn_cerrar(c, "sin memoria, numero");
           return 1;
         }
@@ -1002,74 +997,6 @@ static void recibir_nombre(void) {
   }
 }
 
-/* Puntua una interfaz USB: 3 = MTP clasico, 2 = clase de imagen, 1 = clase del fabricante (sin ser ADB), 0 = no sirve */
-static int puntuar_if(int cc, int cs, int cp, unsigned char ein, unsigned char eout) {
-  if (!ein || !eout) return 0;
-  if (cc == 6 && cs == 1 && cp == 1) return 3;
-  if (cc == 6) return 2;
-  if (cc == 255 && cs != 0x42) return 1;
-  return 0;
-}
-
-/* Lee el descriptor de configuracion del dispositivo y busca la interfaz MTP.
-   Devuelve 0 si la encontro (y rellena interfaz y endpoints). */
-static int buscar_mtp(void *dev, int *iface, unsigned char *ein, unsigned char *eout) {
-  if (!p_ctrl) return -1;
-  void *h = NULL;
-  if (p_abrir(dev, &h) != 0 || !h) return -1;
-  uint8_t cfg[1024];
-  memset(cfg, 0, sizeof(cfg));
-  int res = -1;
-  int n = p_ctrl(h, 0x80, 0x06, 0x0200, 0, cfg, 9, 2000);
-  if (n >= 9) {
-    int total = cfg[2] | (cfg[3] << 8);
-    if (total > (int)sizeof(cfg)) total = (int)sizeof(cfg);
-    n = p_ctrl(h, 0x80, 0x06, 0x0200, 0, cfg, (uint16_t)total, 2000);
-    if (n > 0) {
-      int best = 0, bi = 0;
-      unsigned char bin = 0, bout = 0;
-      int cn = -1, cc = 0, cs = 0, cp = 0;
-      unsigned char ci = 0, co = 0;
-      int pos = 0;
-      while (pos + 2 <= n) {
-        int l = cfg[pos];
-        int t = cfg[pos + 1];
-        if (l < 2 || pos + l > n) break;
-        if (t == 4 && l >= 9) {
-          if (cn >= 0) {
-            int sc = puntuar_if(cc, cs, cp, ci, co);
-            if (sc > best) { best = sc; bi = cn; bin = ci; bout = co; }
-          }
-          cn = (cfg[pos + 3] == 0) ? cfg[pos + 2] : -1;   /* solo la alternativa 0 */
-          cc = cfg[pos + 5];
-          cs = cfg[pos + 6];
-          cp = cfg[pos + 7];
-          ci = 0;
-          co = 0;
-        } else if (t == 5 && l >= 7 && cn >= 0) {
-          unsigned char addr = cfg[pos + 2];
-          if ((cfg[pos + 3] & 3) == 2) {   /* bulk */
-            if (addr & 0x80) ci = addr; else co = addr;
-          }
-        }
-        pos += l;
-      }
-      if (cn >= 0) {
-        int sc = puntuar_if(cc, cs, cp, ci, co);
-        if (sc > best) { best = sc; bi = cn; bin = ci; bout = co; }
-      }
-      if (best > 0) {
-        *iface = bi;
-        *ein = bin;
-        *eout = bout;
-        res = 0;
-      }
-    }
-  }
-  p_cerrar(h);
-  return res;
-}
-
 /* Espacio libre de la PS4 (bytes) en /user. Se busca statfs en la libreria del sistema; si no esta, devuelve -1. */
 static int libre_ps4(long long *libre) {
   int hs[2];
@@ -1100,15 +1027,15 @@ static int principal(void) {
   char msg[400];
   signal(SIGPIPE, SIG_IGN);
   for (int i = 0; i < MAXC; i++) cs[i].fd = -1;
-  anotar("v35 arranco", 0);
-  avisar("v35: instalando desde el celular por USB...");
+  anotar("v34 arranco", 0);
+  avisar("v34: instalando desde el celular por USB...");
   recibir_nombre();
 
   int res = 0;
   int hu = sceKernelLoadStartModule("/system/common/lib/libSceUsbd.sprx", 0, NULL, 0, NULL, &res);
   anotar("cargar libSceUsbd", hu);
   if (hu < 0) {
-    avisar("v35: no pude cargar libSceUsbd (mira el log)");
+    avisar("v34: no pude cargar libSceUsbd (mira el log)");
     return 0;
   }
   void *fn[8];
@@ -1117,7 +1044,7 @@ static int principal(void) {
                             "sceUsbdReleaseInterface", "sceUsbdClose"};
   for (int i = 0; i < 8; i++) {
     if (resolver(hu, nombres[i], NULL, &fn[i]) != 0) {
-      avisar("v35: faltan funciones de USB (mira el log)");
+      avisar("v34: faltan funciones de USB (mira el log)");
       return 0;
     }
   }
@@ -1148,36 +1075,6 @@ static int principal(void) {
       break;
     }
   }
-  if (!cel) {
-    /* No hay Xiaomi: se prueba con cualquier otro dispositivo que se presente como MTP */
-    {
-      void *fc = NULL;
-      if (resolver(hu, "sceUsbdControlTransfer", NULL, &fc) == 0 && fc) {
-        p_ctrl = (int (*)(void *, uint8_t, uint8_t, uint16_t, uint16_t, unsigned char *, uint16_t, unsigned int))fc;
-      } else {
-        anotar("no encontre sceUsbdControlTransfer (solo funciona con Xiaomi)", 0);
-      }
-    }
-    for (int j = 0; j < n && !cel; j++) {
-      unsigned char d[18];
-      memset(d, 0, sizeof(d));
-      if (p_desc(lista[j], d) != 0) continue;
-      if (d[4] == 9) continue;   /* hub */
-      int ifc = 0;
-      unsigned char ei = 0, eo = 0;
-      if (buscar_mtp(lista[j], &ifc, &ei, &eo) == 0) {
-        cel = lista[j];
-        bcd = d[2] | (d[3] << 8);
-        g_iface = ifc;
-        g_ep_in = ei;
-        g_ep_out = eo;
-        anotar("celular detectado como MTP, fabricante (VID)", (long)(d[8] | (d[9] << 8)));
-        anotar("interfaz MTP", ifc);
-        anotar("endpoint de entrada", ei);
-        anotar("endpoint de salida", eo);
-      }
-    }
-  }
   if (cel) {
     anotar("el celular dice ser USB (bcd, 0x200=USB2, 0x300=USB3)", (long)bcd);
     void *fvel = NULL;
@@ -1185,28 +1082,27 @@ static int principal(void) {
       int sp = ((int (*)(void *))fvel)(cel);
       anotar("velocidad negociada del enlace USB (3=alta 480 Mbps, 4=super 5 Gbps, 5=super+)", sp);
       const char *nom = sp == 3 ? "USB 2.0 (480 Mbps)" : sp == 4 ? "USB 3 (5 Gbps)" : sp == 5 ? "USB 3.1 (10 Gbps)" : sp == 2 ? "USB lento (12 Mbps)" : "desconocida";
-      snprintf(msg, sizeof(msg), "v35: enlace con el celular: %s", nom);
+      snprintf(msg, sizeof(msg), "v34: enlace con el celular: %s", nom);
       avisar(msg);
     } else {
       anotar("no pude leer la velocidad del enlace USB", 0);
     }
   }
   if (!cel) {
-    avisar("v35: no encontre el celular (revisa el cable y el modo Transferencia de archivos)");
+    avisar("v34: no encontre el celular (cable y modo Transferencia de archivos)");
     return 0;
   }
   void *h = NULL;
   r = p_abrir(cel, &h);
   anotar("abrir celular", r);
   if (r != 0 || !h) {
-    avisar("v35: no pude abrir el celular por USB (mira el log)");
+    avisar("v34: no pude abrir el celular por USB (mira el log)");
     return 0;
   }
-  r = p_reclamar(h, g_iface);
-  anotar("reclamar interfaz", g_iface);
-  anotar("reclamar, resultado", r);
+  r = p_reclamar(h, 0);
+  anotar("reclamar interfaz 0", r);
   if (r != 0) {
-    avisar("v35: no pude reclamar la interfaz USB del celular (mira el log)");
+    avisar("v34: no pude reclamar la interfaz USB del celular (mira el log)");
     p_cerrar(h);
     return 0;
   }
@@ -1230,7 +1126,7 @@ static int principal(void) {
     }
   }
   if (!dl) {
-    avisar("v35: no encontre la carpeta Download en el celular");
+    avisar("v34: no encontre la carpeta Download en el celular");
     cerrar_usb();
     return 0;
   }
@@ -1269,18 +1165,18 @@ static int principal(void) {
       }
     }
     if (!g_pedido[0] || por_nombre || intento == 4) break;
-    if (intento == 0) avisar("v35: el celular aun no muestra ese archivo; espero unos segundos...");
+    if (intento == 0) avisar("v34: el celular aun no muestra ese archivo; espero unos segundos...");
     anotar("no aparece todavia, reintento", intento + 1);
     sleep(3);
   }
   if (g_pedido[0] && !por_nombre) {
     if (visto_vacio) {
       snprintf(msg, sizeof(msg),
-               "v35: el celular muestra %s con tamano 0. Desconecta y conecta el cable (modo Transferencia de archivos) y prueba otra vez",
+               "v34: el celular muestra %s con tamano 0. Desconecta y conecta el cable (modo Transferencia de archivos) y prueba otra vez",
                g_pedido);
     } else {
       snprintf(msg, sizeof(msg),
-               "v35: no encontre %s en Download. Revisa que este en esa carpeta y reconecta el cable para que el celular actualice su lista",
+               "v34: no encontre %s en Download. Revisa que este en esa carpeta y reconecta el cable para que el celular actualice su lista",
                g_pedido);
     }
     avisar(msg);
@@ -1288,7 +1184,7 @@ static int principal(void) {
     return 0;
   }
   if (!cand) {
-    avisar("v35: no hay un .pkg grande en la carpeta Download del celular");
+    avisar("v34: no hay un .pkg grande en la carpeta Download del celular");
     cerrar_usb();
     return 0;
   }
@@ -1303,7 +1199,7 @@ static int principal(void) {
       int nl = snprintf(lb, sizeof(lb), "L|%lld|%ld\n", libre, g_tam);
       enviar_app(lb, nl);
       if (libre < (long long)g_tam + (long long)(g_tam / 20)) {
-        snprintf(msg, sizeof(msg), "v35: poco espacio libre: %lld MB libres y el juego pesa %ld MB", libre / 1000000LL, g_tam / 1000000L);
+        snprintf(msg, sizeof(msg), "v34: poco espacio libre: %lld MB libres y el juego pesa %ld MB", libre / 1000000LL, g_tam / 1000000L);
         avisar(msg);
       }
     } else {
@@ -1319,7 +1215,7 @@ static int principal(void) {
   anotar("servidor web (descriptor)", srv);
   anotar("servidor web (puerto)", g_puerto);
   if (srv < 0) {
-    avisar("v35: no pude abrir el servidor web interno (mira el log)");
+    avisar("v34: no pude abrir el servidor web interno (mira el log)");
     cerrar_usb();
     return 0;
   }
@@ -1350,19 +1246,19 @@ static int principal(void) {
       }
     }
     if (ok != 0) {
-      avisar("v35: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
+      avisar("v34: no pude hablar con Remote Package Installer (esta abierto en pantalla?)");
       close(srv);
       cerrar_usb();
       return 0;
     }
-    snprintf(msg, sizeof(msg), "v35: orden enviada a Remote Package Installer (intento %d)", i + 1);
+    snprintf(msg, sizeof(msg), "v34: orden enviada a Remote Package Installer (intento %d)", i + 1);
     avisar(msg);
     long t0 = ms_ahora();
     while (ms_ahora() - t0 < 15000 && g_conexiones == 0) paso(srv);
     anotar("conexiones recibidas tras la orden", g_conexiones);
   }
   if (g_conexiones == 0) {
-    avisar("v35: nadie se conecto al servidor (mira el log)");
+    avisar("v34: nadie se conecto al servidor (mira el log)");
     close(srv);
     if (g_rpi >= 0) close(g_rpi);
     cerrar_usb();
@@ -1417,7 +1313,7 @@ static int principal(void) {
         ult_pct = pct;
         long seg = (ahora - t_ini) / 1000;
         if (seg < 1) seg = 1;
-        snprintf(msg, sizeof(msg), "v35: %d%% (%ld de %ld MB, %ld MB/s)", pct,
+        snprintf(msg, sizeof(msg), "v34: %d%% (%ld de %ld MB, %ld MB/s)", pct,
                  hecho / 1000000L, g_tam / 1000000L, hecho / 1000000L / seg);
         avisar(msg);
       }
@@ -1441,11 +1337,11 @@ static int principal(void) {
   if (g_listo) {
     long seg = (t_listo - t_ini) / 1000;
     if (seg < 1) seg = 1;
-    snprintf(msg, sizeof(msg), "v35: descarga completa (%ld MB en %ld s, %ld MB/s). Servidor cerrado.",
+    snprintf(msg, sizeof(msg), "v34: descarga completa (%ld MB en %ld s, %ld MB/s). Servidor cerrado.",
              g_tam / 1000000L, seg, g_tam / 1000000L / seg);
   } else {
     snprintf(msg, sizeof(msg),
-             "v35: servidor termino sin completar. conexiones=%d enviado=%ld de %ld bytes",
+             "v34: servidor termino sin completar. conexiones=%d enviado=%ld de %ld bytes",
              g_conexiones, g_servido, g_tam);
   }
   avisar(msg);
